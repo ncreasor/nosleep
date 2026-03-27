@@ -8,24 +8,15 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 
 client = OpenAI(api_key=settings.openai_api_key)
 
-PROMPTS = {
-    "default": "You are a helpful assistant.",
-    "document_analyzer": "Ты анализируешь документы. Выделяй ключевые моменты, суммируй информацию, давай полезные инсайты.",
-    "technical_expert": "Ты технический эксперт. Объясняй сложные концепции просто и понятно.",
-    "friendly": "Ты дружелюбный помощник. Отвечай с теплотой и используй эмодзи где уместно.",
-}
-
 
 class ChatRequest(BaseModel):
     messages: list[dict]
-    mode: str = "default"
-    document_text: str | None = None
+    system: str = "You are a helpful assistant."
 
 
-class AnalyzeRequest(BaseModel):
-    text: str
-    mode: str = "document_analyzer"
-    language: str = "ru"
+class ChatStreamRequest(BaseModel):
+    messages: list[dict]
+    system: str = "You are a helpful assistant."
 
 
 class EmbedRequest(BaseModel):
@@ -43,20 +34,10 @@ async def ai_ping():
 
 @router.post("/chat")
 async def chat(request: ChatRequest):
-    mode = request.mode if request.mode in PROMPTS else "default"
-    system_prompt = PROMPTS[mode]
-
-    messages = request.messages.copy()
-    if request.document_text:
-        messages.insert(0, {
-            "role": "user",
-            "content": f"[DOCUMENT CONTEXT]\n{request.document_text}\n[END CONTEXT]"
-        })
-
     try:
         response = client.chat.completions.create(
             model=settings.openai_model,
-            messages=[{"role": "system", "content": system_prompt}] + messages,
+            messages=[{"role": "system", "content": request.system}] + request.messages,
             temperature=0.7,
         )
         return {
@@ -68,22 +49,12 @@ async def chat(request: ChatRequest):
 
 
 @router.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
-    mode = request.mode if request.mode in PROMPTS else "default"
-    system_prompt = PROMPTS[mode]
-
-    messages = request.messages.copy()
-    if request.document_text:
-        messages.insert(0, {
-            "role": "user",
-            "content": f"[DOCUMENT CONTEXT]\n{request.document_text}\n[END CONTEXT]"
-        })
-
+async def chat_stream(request: ChatStreamRequest):
     async def generate():
         try:
             stream = client.chat.completions.create(
                 model=settings.openai_model,
-                messages=[{"role": "system", "content": system_prompt}] + messages,
+                messages=[{"role": "system", "content": request.system}] + request.messages,
                 temperature=0.7,
                 stream=True,
             )
@@ -94,30 +65,6 @@ async def chat_stream(request: ChatRequest):
             yield f"data: ERROR: {str(e)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
-
-
-@router.post("/analyze")
-async def analyze(request: AnalyzeRequest):
-    mode = request.mode if request.mode in PROMPTS else "document_analyzer"
-    system_prompt = PROMPTS[mode]
-
-    analysis_prompt = f"Проанализируй следующий текст на {request.language}:\n\n{request.text}"
-
-    try:
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": analysis_prompt},
-            ],
-            temperature=0.7,
-        )
-        return {
-            "role": "assistant",
-            "content": response.choices[0].message.content,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/embed")
