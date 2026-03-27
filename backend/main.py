@@ -1,9 +1,19 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
+from database import init_db
+from routers import documents
 
-# CORS middleware
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,16 +22,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(documents.router)
+
 
 @app.get("/health")
 def health():
-    """Health check endpoint"""
     return {"status": "ok"}
 
 
 @app.get("/")
 def read_root():
-    """Root endpoint"""
     return {"message": "Welcome to FastAPI Backend"}
 
 
