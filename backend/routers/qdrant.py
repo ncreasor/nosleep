@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from qdrant_client import QdrantClient
+import httpx
 from config import settings
 
 router = APIRouter(prefix="/qdrant", tags=["qdrant"])
@@ -8,15 +8,30 @@ router = APIRouter(prefix="/qdrant", tags=["qdrant"])
 @router.get("/ping")
 async def qdrant_ping():
     try:
-        kwargs = {"url": settings.qdrant_url}
+        headers = {}
         if settings.qdrant_service_api_key:
-            kwargs["api_key"] = settings.qdrant_service_api_key
-        client = QdrantClient(**kwargs)
-        collections = client.get_collections()
-        return {
-            "status": "ok",
-            "collections": [c.name for c in collections.collections],
-        }
+            headers["api-key"] = settings.qdrant_service_api_key
+
+        url = f"{settings.qdrant_url}/health"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(url, headers=headers)
+            if response.status_code == 200:
+                try:
+                    return {
+                        "status": "ok",
+                        "qdrant_status": response.json(),
+                    }
+                except:
+                    return {
+                        "status": "ok",
+                        "response": response.text,
+                    }
+            else:
+                return {
+                    "status": "ok",
+                    "code": response.status_code,
+                    "response": response.text,
+                }
     except Exception as e:
         import traceback
         print(f"Qdrant error: {e}")
