@@ -18,11 +18,11 @@ openai_client = OpenAI(api_key=settings.openai_api_key)
 
 def get_qdrant_client() -> QdrantClient:
     """Get Qdrant client instance"""
-    headers = {}
-    if settings.qdrant_service_api_key:
-        headers["api-key"] = settings.qdrant_service_api_key
-
-    return QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_service_api_key or None)
+    return QdrantClient(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_service_api_key or None,
+        timeout=30.0,
+    )
 
 
 def ensure_collection(client: QdrantClient, collection_name: str = "legal_documents", vector_size: int = 1536):
@@ -123,23 +123,26 @@ async def process_document(document_id: int, db: AsyncSession) -> bool:
         # Generate embedding
         embedding = generate_embedding(text)
 
-        # Store in Qdrant
+        # Store in Qdrant (with fallback if Qdrant is unavailable)
         qdrant_id = str(uuid.uuid4())
-        client = get_qdrant_client()
-        ensure_collection(client)
+        try:
+            client = get_qdrant_client()
+            ensure_collection(client)
 
-        snippet = text[:300] if len(text) > 300 else text
-        point = PointStruct(
-            id=hash(qdrant_id) % (2**63 - 1),
-            vector=embedding,
-            payload={
-                "doc_id": document_id,
-                "title": doc.title,
-                "classification": classification,
-                "snippet": snippet,
-            },
-        )
-        client.upsert("legal_documents", points=[point])
+            snippet = text[:300] if len(text) > 300 else text
+            point = PointStruct(
+                id=hash(qdrant_id) % (2**63 - 1),
+                vector=embedding,
+                payload={
+                    "doc_id": document_id,
+                    "title": doc.title,
+                    "classification": classification,
+                    "snippet": snippet,
+                },
+            )
+            client.upsert("legal_documents", points=[point])
+        except Exception as e:
+            logger.warning(f"Failed to store in Qdrant: {e}, continuing without vector storage")
 
         # Update document
         await db.execute(

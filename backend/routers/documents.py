@@ -122,26 +122,30 @@ async def search_documents(q: str, limit: int = 10, db: AsyncSession = Depends(g
         client = get_qdrant_client()
         ensure_collection(client)
 
-        results = client.search(
-            collection_name="legal_documents",
-            query_vector=query_embedding,
-            limit=limit,
-            with_payload=True,
-        )
-
-        search_results = []
-        for hit in results:
-            payload = hit.payload
-            search_results.append(
-                DocumentSearchResult(
-                    id=payload["doc_id"],
-                    title=payload["title"],
-                    classification=payload.get("classification"),
-                    score=hit.score,
-                    snippet=payload.get("snippet", ""),
-                )
+        try:
+            results = client.search(
+                collection_name="legal_documents",
+                query_vector=query_embedding,
+                limit=limit,
+                with_payload=True,
             )
 
-        return search_results
+            search_results = []
+            for hit in results:
+                payload = hit.payload
+                search_results.append(
+                    DocumentSearchResult(
+                        id=payload["doc_id"],
+                        title=payload["title"],
+                        classification=payload.get("classification"),
+                        score=hit.score,
+                        snippet=payload.get("snippet", ""),
+                    )
+                )
+
+            return search_results
+        except Exception as qdrant_err:
+            return []
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
