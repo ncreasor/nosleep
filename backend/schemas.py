@@ -159,3 +159,56 @@ class FolderResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TemplateFolderCreate(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class TemplateFolderUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class TemplateFolderResponse(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    description: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TemplateCreate(BaseModel):
+    folder_id: int | None = None
+    name: str
+    description: str | None = None
+    content: str
+    tags: str | None = None
+
+
+class TemplateUpdate(BaseModel):
+    folder_id: int | None = None
+    name: str | None = None
+    description: str | None = None
+    content: str | None = None
+    tags: str | None = None
+
+
+class TemplateResponse(BaseModel):
+    id: int
+    user_id: int
+    folder_id: int | None
+    name: str
+    description: str | None = None
+    content: str
+    tags: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -15,6 +15,31 @@ class Folder(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class TemplateFolder(Base):
+    __tablename__ = "template_folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    name = Column(String, index=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Template(Base):
+    __tablename__ = "templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    folder_id = Column(Integer, ForeignKey("template_folders.id"), nullable=True, index=True)
+    name = Column(String, index=True)
+    description = Column(Text, nullable=True)
+    content = Column(Text)  # Template content
+    tags = Column(String, nullable=True)  # Comma-separated tags
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Document(Base):
     __tablename__ = "documents"
 
