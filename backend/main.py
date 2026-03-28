@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import init_db
 from config import settings
-from routers import documents, qdrant, ai, auth, chats
+from routers import documents, qdrant, ai, auth, chats, admin
 
 
 @asynccontextmanager
@@ -28,6 +28,7 @@ app.include_router(qdrant.router)
 app.include_router(ai.router)
 app.include_router(auth.router)
 app.include_router(chats.router)
+app.include_router(admin.router)
 
 
 @app.get("/health")

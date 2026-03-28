@@ -8,7 +8,7 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from models import Document, User
+from models import Document, User, AuditLog
 from schemas import DocumentResponse, DocumentUpdate, DocumentSearchResult
 from auth import get_current_user
 from config import settings
@@ -68,6 +68,16 @@ async def upload_document(
     db.add(doc)
     await db.commit()
     await db.refresh(doc)
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action="document.upload",
+        resource_type="document",
+        resource_id=doc.id,
+        detail=f"Uploaded {file.filename} ({len(content)} bytes)",
+    )
+    db.add(log)
+    await db.commit()
 
     asyncio.create_task(background_process_document(doc.id))
 
@@ -247,6 +257,15 @@ async def delete_document(
         os.remove(doc.file_path)
 
     await db.execute(delete(Document).where(Document.id == document_id))
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action="document.delete",
+        resource_type="document",
+        resource_id=document_id,
+        detail=f"Deleted {doc.title}",
+    )
+    db.add(log)
     await db.commit()
 
 

@@ -4,7 +4,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
-from models import User, Chat, ChatMessage
+from models import User, Chat, ChatMessage, AuditLog
 from schemas import UserCreate, UserUpdate, UserResponse, Token
 from auth import hash_password, verify_password, create_access_token, get_current_user
 from config import settings
@@ -24,6 +24,17 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
+
+    log = AuditLog(
+        user_id=new_user.id,
+        action="user.register",
+        resource_type="user",
+        resource_id=new_user.id,
+        detail=f"User registered: {new_user.email}",
+    )
+    db.add(log)
+    await db.commit()
+
     return new_user
 
 
@@ -83,5 +94,16 @@ async def delete_me(
         await db.execute(delete(ChatMessage).where(ChatMessage.chat_id == chat.id))
 
     await db.execute(delete(Chat).where(Chat.user_id == current_user.id))
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action="user.delete",
+        resource_type="user",
+        resource_id=current_user.id,
+        detail=f"User deleted: {current_user.email}",
+    )
+    db.add(log)
+    await db.commit()
+
     await db.execute(delete(User).where(User.id == current_user.id))
     await db.commit()
