@@ -16,7 +16,7 @@ async def create_chat(
     db: AsyncSession = Depends(get_db),
 ):
     title = chat_data.title or "New Chat"
-    new_chat = Chat(user_id=current_user.id, title=title)
+    new_chat = Chat(user_id=current_user.id, title=title, document_id=chat_data.document_id)
     db.add(new_chat)
     await db.commit()
     await db.refresh(new_chat)
@@ -54,6 +54,7 @@ async def get_chat(
     return {
         "id": chat.id,
         "title": chat.title,
+        "document_id": chat.document_id,
         "created_at": chat.created_at,
         "updated_at": chat.updated_at,
         "messages": messages,
@@ -93,6 +94,7 @@ async def delete_chat(
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
 
+    await db.execute(delete(ChatMessage).where(ChatMessage.chat_id == chat_id))
     await db.execute(delete(Chat).where(Chat.id == chat_id))
     await db.commit()
 
