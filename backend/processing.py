@@ -64,6 +64,48 @@ def generate_embedding(text: str) -> list[float]:
     return response.data[0].embedding
 
 
+def extract_metadata(text: str, title: str) -> dict:
+    """Extract metadata from document using GPT"""
+    prompt = f"""Analyze this legal document and extract metadata.
+
+Document title: {title}
+Document text (first 1000 chars):
+{text[:1000]}
+
+Return JSON with:
+- category: one of "трудовое", "гражданское", "уголовное", "административное", "конституционное", "другое"
+- law_date: ISO date (YYYY-MM-DD) if document has effective date, else null
+- law_number: official number if mentioned (e.g. "№ 194-IV"), else null
+- jurisdiction: country/region, default "Kazakhstan"
+
+Return ONLY JSON."""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=150,
+        )
+
+        import json
+        result = json.loads(response.choices[0].message.content)
+        return {
+            "category": result.get("category"),
+            "law_date": result.get("law_date"),
+            "law_number": result.get("law_number"),
+            "jurisdiction": result.get("jurisdiction", "Kazakhstan"),
+        }
+    except Exception as e:
+        logger.warning(f"Metadata extraction error: {e}")
+        return {
+            "category": None,
+            "law_date": None,
+            "law_number": None,
+            "jurisdiction": "Kazakhstan",
+        }
+
+
 def classify_document(text: str, title: str) -> tuple[str, str]:
     """Classify document using GPT"""
     prompt = f"""You are a Kazakh/Russian legal document classifier.
@@ -96,6 +138,19 @@ Return ONLY JSON in format: {{"classification": "genuine|outdated|invalid", "rea
         return "genuine", "Could not classify"
 
 
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> list[str]:
+    """Split text into overlapping chunks for RAG"""
+    words = text.split()
+    chunks = []
+
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = " ".join(words[i : i + chunk_size])
+        if chunk.strip():
+            chunks.append(chunk)
+
+    return chunks
+
+
 async def process_document(document_id: int, db: AsyncSession) -> bool:
     """Process document: extract text, classify, embed, store in Qdrant"""
     try:
@@ -119,11 +174,14 @@ async def process_document(document_id: int, db: AsyncSession) -> bool:
             await db.commit()
             return False
 
+        # Extract metadata
+        metadata = extract_metadata(text, doc.title)
+
         # Classify
         classification, reason = classify_document(text, doc.title)
 
-        # Generate embedding
-        embedding = generate_embedding(text)
+        # Generate embedding for main document
+        embedding = generate_embedding(text[:8191])
 
         # Store in Qdrant (with fallback if Qdrant is unavailable)
         qdrant_id = str(uuid.uuid4())
@@ -144,10 +202,27 @@ async def process_document(document_id: int, db: AsyncSession) -> bool:
                 },
             )
             client.upsert(settings.qdrant_collection, points=[point])
+
+            chunks = chunk_text(text)
+            for idx, chunk in enumerate(chunks[:10]):
+                chunk_embedding = generate_embedding(chunk)
+                chunk_id = str(uuid.uuid4())
+                chunk_point = PointStruct(
+                    id=chunk_id,
+                    vector=chunk_embedding,
+                    payload={
+                        "doc_id": document_id,
+                        "user_id": doc.user_id,
+                        "title": doc.title,
+                        "chunk_index": idx,
+                        "snippet": chunk[:200],
+                    },
+                )
+                client.upsert(settings.qdrant_collection, points=[chunk_point])
         except Exception as e:
             logger.warning(f"Failed to store in Qdrant: {e}, continuing without vector storage")
 
-        # Update document
+        # Update document with metadata and classification
         await db.execute(
             update(DocumentModel)
             .where(DocumentModel.id == document_id)
@@ -155,6 +230,10 @@ async def process_document(document_id: int, db: AsyncSession) -> bool:
                 status="ready",
                 classification=classification,
                 classification_reason=reason,
+                category=metadata.get("category"),
+                law_date=metadata.get("law_date"),
+                law_number=metadata.get("law_number"),
+                jurisdiction=metadata.get("jurisdiction"),
                 qdrant_id=qdrant_id,
                 extracted_text=text,
             )
