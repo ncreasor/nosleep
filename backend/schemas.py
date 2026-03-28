@@ -135,3 +135,27 @@ class DocumentInsights(BaseModel):
     sections_count: int
     definitions_count: int
     key_terms: list[str]
+
+
+class FolderCreate(BaseModel):
+    name: str
+    document_type: str
+    description: str | None = None
+
+
+class FolderUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class FolderResponse(BaseModel):
+    id: int
+    user_id: int | None
+    name: str
+    document_type: str
+    description: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
