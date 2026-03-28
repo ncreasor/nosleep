@@ -1,6 +1,43 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean
 from database import Base
+
+
+class Folder(Base):
+    __tablename__ = "folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    name = Column(String, index=True)
+    document_type = Column(String, index=True)  # e.g., "invoice", "lawsuit", "contract"
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TemplateFolder(Base):
+    __tablename__ = "template_folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    name = Column(String, index=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Template(Base):
+    __tablename__ = "templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    folder_id = Column(Integer, ForeignKey("template_folders.id"), nullable=True, index=True)
+    name = Column(String, index=True)
+    description = Column(Text, nullable=True)
+    content = Column(Text)  # Template content
+    tags = Column(String, nullable=True)  # Comma-separated tags
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Document(Base):
@@ -8,6 +45,7 @@ class Document(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    folder_id = Column(Integer, ForeignKey("folders.id"), nullable=True, index=True)
     title = Column(String, index=True)
     filename = Column(String)
     file_path = Column(String)
@@ -35,6 +73,7 @@ class User(Base):
     hashed_password = Column(String)
     role = Column(String, default="analyst", index=True)
     is_active = Column(Integer, default=1)
+    terms_agreed = Column(Boolean, default=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
