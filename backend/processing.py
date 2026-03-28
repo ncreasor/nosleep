@@ -25,7 +25,9 @@ def get_qdrant_client() -> QdrantClient:
     )
 
 
-def ensure_collection(client: QdrantClient, collection_name: str = "legal_documents", vector_size: int = 1536):
+def ensure_collection(client: QdrantClient, collection_name: str = None, vector_size: int = 1536):
+    if collection_name is None:
+        collection_name = settings.qdrant_collection
     """Create collection if it doesn't exist"""
     try:
         client.get_collection(collection_name)
@@ -131,16 +133,17 @@ async def process_document(document_id: int, db: AsyncSession) -> bool:
 
             snippet = text[:300] if len(text) > 300 else text
             point = PointStruct(
-                id=hash(qdrant_id) % (2**63 - 1),
+                id=qdrant_id,
                 vector=embedding,
                 payload={
                     "doc_id": document_id,
+                    "user_id": doc.user_id,
                     "title": doc.title,
                     "classification": classification,
                     "snippet": snippet,
                 },
             )
-            client.upsert("legal_documents", points=[point])
+            client.upsert(settings.qdrant_collection, points=[point])
         except Exception as e:
             logger.warning(f"Failed to store in Qdrant: {e}, continuing without vector storage")
 
