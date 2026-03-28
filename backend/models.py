@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean
 from database import Base
 
 
@@ -35,6 +35,7 @@ class User(Base):
     hashed_password = Column(String)
     role = Column(String, default="analyst", index=True)
     is_active = Column(Integer, default=1)
+    terms_agreed = Column(Boolean, default=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

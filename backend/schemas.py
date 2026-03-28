@@ -42,6 +42,7 @@ class DocumentSearchResult(BaseModel):
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
+    terms_agreed: bool
 
 
 class UserUpdate(BaseModel):
