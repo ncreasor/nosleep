@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from openai import OpenAI
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 from config import settings
 from database import get_db
 from models import Chat, ChatMessage, Document
@@ -154,12 +155,15 @@ async def document_chat(
                 qdrant_client = get_qdrant_client()
                 ensure_collection(qdrant_client)
 
+                filter_cond = Filter(
+                    must=[FieldCondition(key="doc_id", match=MatchValue(value=doc.id))]
+                )
                 search_results = qdrant_client.search(
-                    collection_name="legal_documents",
+                    collection_name=settings.qdrant_collection,
                     query_vector=query_embedding,
                     limit=3,
+                    query_filter=filter_cond,
                     with_payload=True,
-                    query_filter={"doc_id": doc.id},
                 )
 
                 snippets = [hit.payload.get("snippet", "") for hit in search_results if hit.payload.get("doc_id") == doc.id]

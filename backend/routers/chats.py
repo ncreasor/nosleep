@@ -94,6 +94,7 @@ async def delete_chat(
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
 
+    await db.execute(delete(ChatMessage).where(ChatMessage.chat_id == chat_id))
     await db.execute(delete(Chat).where(Chat.id == chat_id))
     await db.commit()
 

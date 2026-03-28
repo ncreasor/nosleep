@@ -19,6 +19,11 @@ class DocumentResponse(BaseModel):
     status: str
     classification: str | None = None
     classification_reason: str | None = None
+    category: str | None = None
+    law_date: datetime | None = None
+    law_number: str | None = None
+    jurisdiction: str | None = None
+    language: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -96,3 +101,16 @@ class ChatResponse(BaseModel):
 
 class ChatWithMessages(ChatResponse):
     messages: list[ChatMessageResponse]
+
+
+class AuditLogResponse(BaseModel):
+    id: int
+    user_id: int | None
+    action: str
+    resource_type: str
+    resource_id: int | None
+    detail: str | None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
