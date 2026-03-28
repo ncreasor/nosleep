@@ -1,8 +1,11 @@
 import './globals.css'
 
 export const metadata = {
-  title: 'Frontend App',
-  description: 'Next.js Frontend Application',
+  title: 'inLaw',
+  description: 'ИИ-анализ юридических документов',
+  icons: {
+    icon: '/inlawlogo.svg',
+  },
 }
 
 export default function RootLayout({ children }) {
