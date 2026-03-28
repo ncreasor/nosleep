@@ -1,11 +1,11 @@
 from datetime import timedelta
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models import User
-from schemas import UserCreate, UserResponse, Token
+from schemas import UserCreate, UserUpdate, UserResponse, Token
 from auth import hash_password, verify_password, create_access_token, get_current_user
 from config import settings
 
@@ -49,3 +49,33 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_me(
+    user_data: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if user_data.email:
+        result = await db.execute(select(User).where(User.email == user_data.email, User.id != current_user.id))
+        existing_user = result.scalars().first()
+        if existing_user:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use")
+        current_user.email = user_data.email
+
+    if user_data.password:
+        current_user.hashed_password = hash_password(user_data.password)
+
+    await db.commit()
+    await db.refresh(current_user)
+    return current_user
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_me(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await db.execute(delete(User).where(User.id == current_user.id))
+    await db.commit()
