@@ -1,27 +1,43 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
+from database import init_db
+from config import settings
+from routers import documents, qdrant, ai, auth, chats, admin
 
-# CORS middleware
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.cors_origins,
+    allow_credentials=settings.cors_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(documents.router)
+app.include_router(qdrant.router)
+app.include_router(ai.router)
+app.include_router(auth.router)
+app.include_router(chats.router)
+app.include_router(admin.router)
+
 
 @app.get("/health")
 def health():
-    """Health check endpoint"""
     return {"status": "ok"}
 
 
 @app.get("/")
 def read_root():
-    """Root endpoint"""
     return {"message": "Welcome to FastAPI Backend"}
 
 
