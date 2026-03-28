@@ -114,3 +114,23 @@ class AuditLogResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class DocumentAnalysis(BaseModel):
+    """Detailed analysis of a legal document."""
+    entities: dict
+    relations: dict
+    structure: dict
+    definitions: dict
+
+
+class DocumentInsights(BaseModel):
+    """Comprehensive document insights."""
+    document_id: int
+    title: str
+    classification: str | None
+    entities_count: int
+    relations_count: int
+    sections_count: int
+    definitions_count: int
+    key_terms: list[str]

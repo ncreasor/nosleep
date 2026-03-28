@@ -9,10 +9,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models import Document, User, AuditLog
-from schemas import DocumentResponse, DocumentUpdate, DocumentSearchResult
+from schemas import DocumentResponse, DocumentUpdate, DocumentSearchResult, DocumentAnalysis, DocumentInsights
 from auth import get_current_user
 from config import settings
-from processing import background_process_document, get_qdrant_client, ensure_collection
+from processing import (
+    background_process_document,
+    get_qdrant_client,
+    ensure_collection,
+    extract_entities_from_document,
+    extract_relations_from_document,
+    parse_document_structure,
+    extract_definitions,
+)
+from forensics import DocumentForensics, format_forensic_report
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 UPLOAD_DIR = Path("uploads")
@@ -286,3 +295,99 @@ async def reprocess_document(
 
     asyncio.create_task(background_process_document(document_id))
     return doc
+
+
+@router.get("/{document_id}/analysis", response_model=DocumentAnalysis)
+async def analyze_document(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get detailed analysis of document: entities, relations, structure, definitions."""
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id, Document.user_id == current_user.id
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if not doc.extracted_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document not yet processed")
+
+    entities = extract_entities_from_document(doc.extracted_text)
+    relations = extract_relations_from_document(doc.extracted_text)
+    structure = parse_document_structure(doc.extracted_text)
+    definitions = extract_definitions(doc.extracted_text)
+
+    return DocumentAnalysis(
+        entities=entities,
+        relations=relations,
+        structure=structure,
+        definitions=definitions,
+    )
+
+
+@router.get("/{document_id}/insights", response_model=DocumentInsights)
+async def get_document_insights(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get high-level insights about document."""
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id, Document.user_id == current_user.id
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if not doc.extracted_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document not yet processed")
+
+    entities_data = extract_entities_from_document(doc.extracted_text)
+    relations_data = extract_relations_from_document(doc.extracted_text)
+    structure_data = parse_document_structure(doc.extracted_text)
+    definitions_data = extract_definitions(doc.extracted_text)
+
+    # Extract key terms from definitions
+    key_terms = list(definitions_data.get("definitions", {}).keys())[:10]
+
+    return DocumentInsights(
+        document_id=doc.id,
+        title=doc.title,
+        classification=doc.classification,
+        entities_count=entities_data.get("total", 0),
+        relations_count=relations_data.get("total", 0),
+        sections_count=structure_data.get("sections_count", 0),
+        definitions_count=definitions_data.get("total", 0),
+        key_terms=key_terms,
+    )
+
+
+@router.get("/{document_id}/forensics")
+async def forensic_analysis(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Analyze document for forgery indicators and authenticity."""
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id, Document.user_id == current_user.id
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if not doc.extracted_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document not yet processed")
+
+    # Run forensic analysis
+    forensic_report = DocumentForensics.analyze(doc.extracted_text, doc.file_path)
+
+    return format_forensic_report(forensic_report)
