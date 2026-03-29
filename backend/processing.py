@@ -11,6 +11,7 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from config import settings
 from models import Document as DocumentModel
 from database import AsyncSessionLocal
+from legal_nlp import LegalNER, RelationExtractor, DocumentParser, DefinitionExtractor
 
 logger = logging.getLogger(__name__)
 openai_client = OpenAI(api_key=settings.openai_api_key)
@@ -151,6 +152,75 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> list[str
     return chunks
 
 
+def extract_entities_from_document(text: str) -> dict:
+    """Extract named entities from legal document."""
+    try:
+        entities = LegalNER.extract_entities(text)
+        return {
+            "total": len(entities),
+            "persons": [e.text for e in entities if e.type.value == "person"],
+            "organizations": [e.text for e in entities if e.type.value == "organization"],
+            "dates": [e.text for e in entities if e.type.value == "date"],
+            "amounts": [e.text for e in entities if e.type.value == "amount"],
+            "law_references": [e.text for e in entities if e.type.value == "law_reference"],
+            "articles": [e.text for e in entities if e.type.value == "article"],
+        }
+    except Exception as e:
+        logger.error(f"Entity extraction failed: {e}")
+        return {"error": str(e)}
+
+
+def extract_relations_from_document(text: str) -> dict:
+    """Extract relations between entities."""
+    try:
+        relations = RelationExtractor.extract_relations(text)
+        grouped = {}
+        for rel in relations:
+            if rel.relation_type not in grouped:
+                grouped[rel.relation_type] = []
+            grouped[rel.relation_type].append({
+                "source": rel.source,
+                "target": rel.target,
+                "confidence": rel.confidence,
+            })
+        return {
+            "total": len(relations),
+            "by_type": grouped,
+        }
+    except Exception as e:
+        logger.error(f"Relation extraction failed: {e}")
+        return {"error": str(e)}
+
+
+def parse_document_structure(text: str) -> dict:
+    """Parse document into structured sections."""
+    try:
+        sections = DocumentParser.parse(text)
+        toc = DocumentParser.get_toc(sections)
+        return {
+            "toc": toc,
+            "sections_count": len(sections),
+            "chapters": len([s for s in sections if s.section_type == "chapter"]),
+            "articles": len([s for s in sections if s.section_type == "article"]),
+        }
+    except Exception as e:
+        logger.error(f"Document parsing failed: {e}")
+        return {"error": str(e)}
+
+
+def extract_definitions(text: str) -> dict:
+    """Extract key terms and definitions."""
+    try:
+        definitions = DefinitionExtractor.extract_definitions(text)
+        return {
+            "total": len(definitions),
+            "definitions": definitions,
+        }
+    except Exception as e:
+        logger.error(f"Definition extraction failed: {e}")
+        return {"error": str(e)}
+
+
 async def process_document(document_id: int, db: AsyncSession) -> bool:
     """Process document: extract text, classify, embed, store in Qdrant"""
     try:
@@ -179,6 +249,19 @@ async def process_document(document_id: int, db: AsyncSession) -> bool:
 
         # Classify
         classification, reason = classify_document(text, doc.title)
+
+        # Extract entities and relations for advanced analysis
+        logger.info(f"Extracting entities for document {document_id}")
+        entities_data = extract_entities_from_document(text)
+
+        logger.info(f"Extracting relations for document {document_id}")
+        relations_data = extract_relations_from_document(text)
+
+        logger.info(f"Parsing document structure for {document_id}")
+        structure_data = parse_document_structure(text)
+
+        logger.info(f"Extracting definitions for document {document_id}")
+        definitions_data = extract_definitions(text)
 
         # Generate embedding for main document
         embedding = generate_embedding(text[:8191])

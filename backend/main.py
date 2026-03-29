@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import init_db
 from config import settings
-from routers import documents, qdrant, ai, auth, chats, admin
+from routers import documents, qdrant, ai, auth, chats, admin, folders, templates
 
 
 @asynccontextmanager
@@ -24,6 +24,8 @@ app.add_middleware(
 )
 
 app.include_router(documents.router)
+app.include_router(folders.router)
+app.include_router(templates.router)
 app.include_router(qdrant.router)
 app.include_router(ai.router)
 app.include_router(auth.router)
