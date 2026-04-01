@@ -4,9 +4,11 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import Sidebar from '@/components/Sidebar'
 import { useAuth } from '@/components/useAuth'
 import { useRouter } from 'next/navigation'
+import FolderColorPicker from '@/components/FolderColorPicker'
+import { DOC_TYPE_COLORS, resolveFolderColor } from '@/lib/folderColors'
 import {
   Search, MoreHorizontal, Trash2, Pencil, X, Check, Plus,
-  FileText, Upload, Folder, FolderPlus, ChevronRight,
+  FileText, Upload, Folder, FolderPlus, ChevronRight, Grid3x3, List, Palette,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
@@ -146,19 +148,21 @@ function NewDocModal({ onClose, onCreate }) {
 function NewFolderModal({ onClose, onCreate }) {
   const [name, setName] = useState('')
   const [docType, setDocType] = useState(DOC_TYPES[0])
+  const [color, setColor] = useState(DOC_TYPE_COLORS[DOC_TYPES[0]])
+  const [colorManuallySet, setColorManuallySet] = useState(false)
   const [loading, setLoading] = useState(false)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!name.trim()) return
     setLoading(true)
-    await onCreate(name.trim(), docType)
+    await onCreate(name.trim(), docType, color)
     setLoading(false)
   }
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50">
-      <div className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-sm p-6">
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-md p-6">
         <div className="flex items-center gap-3 mb-5">
           <span className="w-9 h-9 bg-gray-100 rounded-xl flex items-center justify-center text-gray-500">
             <FolderPlus size={18} />
@@ -181,12 +185,26 @@ function NewFolderModal({ onClose, onCreate }) {
             <label className="text-xs font-medium text-gray-600">Тип документов</label>
             <select
               value={docType}
-              onChange={e => setDocType(e.target.value)}
+              onChange={e => {
+                setDocType(e.target.value)
+                if (!colorManuallySet) {
+                  setColor(DOC_TYPE_COLORS[e.target.value] || '#6B7280')
+                }
+              }}
               className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent bg-white"
             >
               {DOC_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
           </div>
+          <FolderColorPicker
+            selectedColor={color}
+            previewName={name}
+            previewDocType={docType}
+            onSelect={hex => {
+              setColor(hex)
+              setColorManuallySet(true)
+            }}
+          />
           <div className="flex gap-2 mt-1">
             <button
               type="button"
@@ -233,6 +251,9 @@ export default function DocumentsPage() {
   const [folderMenuId, setFolderMenuId] = useState(null)
   const [editingFolderId, setEditingFolderId] = useState(null)
   const [editFolderName, setEditFolderName] = useState('')
+  const [viewMode, setViewMode] = useState('home') // 'home', 'documents', or 'folders'
+  const [colorPickerFolderId, setColorPickerFolderId] = useState(null)
+  const [pendingColor, setPendingColor] = useState(null)
 
   const searchTimeout = useRef(null)
   const uploadInputRef = useRef(null)
@@ -308,6 +329,7 @@ export default function DocumentsPage() {
       const file = new File([blob], `${title}.txt`, { type: 'text/plain' })
       const formData = new FormData()
       formData.append('file', file)
+      if (activeFolderId !== null) formData.append('folder_id', activeFolderId)
       const res = await fetch(`${BACKEND}/documents/upload`, {
         method: 'POST',
         headers: authHeaders,
@@ -320,6 +342,10 @@ export default function DocumentsPage() {
           headers: { ...authHeaders, 'Content-Type': 'application/json' },
           body: JSON.stringify({ title }),
         })
+        // Add to local state immediately so counts update
+        const newDoc = { ...doc, title, folder_id: activeFolderId }
+        setDocuments(prev => [newDoc, ...prev])
+        if (activeFolderId !== null) setFolderDocs(prev => [newDoc, ...(prev || [])])
         setShowNewDoc(false)
         router.push(`/documents/${doc.id}`)
       } else {
@@ -333,7 +359,7 @@ export default function DocumentsPage() {
     }
   }
 
-  const handleCreateFolder = async (name, docType) => {
+  const handleCreateFolder = async (name, docType, color) => {
     try {
       const res = await fetch(`${BACKEND}/folders`, {
         method: 'POST',
@@ -380,6 +406,22 @@ export default function DocumentsPage() {
     setFolderMenuId(null)
   }
 
+  const handleChangeColor = async (folderId, hex) => {
+    try {
+      const res = await fetch(`${BACKEND}/folders/${folderId}`, {
+        method: 'PATCH',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ color: hex }),
+      })
+      if (res.ok) {
+        const updated = await res.json()
+        setFolders(f => f.map(x => x.id === folderId ? updated : x))
+      }
+    } catch (e) { console.error(e) }
+    setColorPickerFolderId(null)
+    setPendingColor(null)
+  }
+
   const handleUploadFile = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -387,6 +429,7 @@ export default function DocumentsPage() {
     try {
       const formData = new FormData()
       formData.append('file', file)
+      if (activeFolderId !== null) formData.append('folder_id', activeFolderId)
       const res = await fetch(`${BACKEND}/documents/upload`, {
         method: 'POST',
         headers: authHeaders,
@@ -398,6 +441,9 @@ export default function DocumentsPage() {
         return
       }
       const doc = await res.json()
+      const newDoc = { ...doc, folder_id: activeFolderId }
+      setDocuments(prev => [newDoc, ...prev])
+      if (activeFolderId !== null) setFolderDocs(prev => [newDoc, ...(prev || [])])
       if (file.name.toLowerCase().endsWith('.docx')) {
         const mammoth = (await import('mammoth')).default
         const arrayBuffer = await file.arrayBuffer()
@@ -454,6 +500,35 @@ export default function DocumentsPage() {
 
   const activeFolder = folders.find(f => f.id === activeFolderId)
 
+  const handleFolderClick = (folderId) => {
+    setActiveFolderId(folderId)
+    setViewMode('documents')
+  }
+
+  // Get documents grouped by folder
+  const getDocumentsByFolder = () => {
+    const grouped = {}
+    documents.forEach(doc => {
+      const folderId = doc.folder_id || 'unassigned'
+      if (!grouped[folderId]) grouped[folderId] = []
+      grouped[folderId].push(doc)
+    })
+    return grouped
+  }
+
+  // Get folder name or "Unassigned"
+  const getFolderName = (folderId) => {
+    if (folderId === 'unassigned') return 'Без папки'
+    const folder = folders.find(f => f.id === parseInt(folderId))
+    return folder?.name || 'Unknown'
+  }
+
+  // Get folder or create a synthetic one for unassigned
+  const getFolderObject = (folderId) => {
+    if (folderId === 'unassigned') return { id: 'unassigned', name: 'Без папки', document_type: 'mixed' }
+    return folders.find(f => f.id === parseInt(folderId))
+  }
+
   if (authLoading) return null
 
   return (
@@ -474,6 +549,7 @@ export default function DocumentsPage() {
           <div className="rounded-2xl border border-gray-300 bg-white shadow-sm h-full flex overflow-hidden">
 
             {/* Folder panel */}
+            {(viewMode === 'documents' || viewMode === 'home') && (
             <div className="w-52 flex-shrink-0 border-r border-gray-100 flex flex-col py-4">
               <div className="px-4 mb-3 flex items-center justify-between">
                 <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Папки</span>
@@ -532,7 +608,7 @@ export default function DocumentsPage() {
                             : 'text-gray-600 hover:bg-gray-50'
                         }`}
                       >
-                        <Folder size={15} className={activeFolderId === folder.id ? 'text-brand-hover' : 'text-gray-400'} />
+                        <Folder size={15} style={{ color: resolveFolderColor(folder), opacity: activeFolderId === folder.id ? 1 : 0.65 }} className="flex-shrink-0" />
                         <span className="flex-1 truncate">{folder.name}</span>
                         <button
                           onClick={e => { e.stopPropagation(); setFolderMenuId(folderMenuId === folder.id ? null : folder.id) }}
@@ -545,6 +621,12 @@ export default function DocumentsPage() {
 
                     {folderMenuId === folder.id && (
                       <div className="absolute left-full top-0 ml-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 py-1 w-40">
+                        <button
+                          onClick={e => { e.stopPropagation(); setColorPickerFolderId(folder.id); setPendingColor(resolveFolderColor(folder)); setFolderMenuId(null) }}
+                          className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 w-full text-left"
+                        >
+                          <Palette size={13} /> Изменить цвет
+                        </button>
                         <button
                           onClick={e => { e.stopPropagation(); setEditingFolderId(folder.id); setEditFolderName(folder.name); setFolderMenuId(null) }}
                           className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 w-full text-left"
@@ -559,6 +641,30 @@ export default function DocumentsPage() {
                         </button>
                       </div>
                     )}
+
+                    {colorPickerFolderId === folder.id && (
+                      <div
+                        className="absolute left-full top-0 ml-1 bg-white border border-gray-200 rounded-xl shadow-xl z-30 p-4 w-72"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        <FolderColorPicker
+                          selectedColor={pendingColor}
+                          previewName={folder.name}
+                          previewDocType={folder.document_type}
+                          onSelect={hex => setPendingColor(hex)}
+                        />
+                        <div className="flex gap-2 mt-3">
+                          <button
+                            onClick={() => setColorPickerFolderId(null)}
+                            className="flex-1 border border-gray-200 text-gray-600 text-xs py-1.5 rounded-full hover:bg-gray-50"
+                          >Отмена</button>
+                          <button
+                            onClick={() => handleChangeColor(folder.id, pendingColor)}
+                            className="flex-1 bg-brand hover:bg-brand-hover text-ink text-xs font-semibold py-1.5 rounded-full"
+                          >Сохранить</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
 
@@ -567,88 +673,366 @@ export default function DocumentsPage() {
                 )}
               </div>
             </div>
+            )}
 
             {/* Main content */}
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
               {/* Header */}
-              <div className="flex items-center justify-between px-8 py-6">
+              <div className="flex items-center justify-between px-8 py-6 border-b border-gray-100">
                 <div className="flex items-center gap-4">
-                  <h1 className="text-3xl font-bold text-ink">
-                    {activeFolder ? activeFolder.name : 'Документы'}
-                  </h1>
-                  {activeFolder && (
+                  {viewMode === 'home' && (
+                    <h1 className="text-3xl font-bold text-ink">Документы</h1>
+                  )}
+                  {viewMode === 'documents' && (
+                    <h1 className="text-3xl font-bold text-ink">
+                      {activeFolder ? activeFolder.name : 'Документы'}
+                    </h1>
+                  )}
+                  {viewMode === 'folders' && (
+                    <div className="flex items-center gap-2 text-sm text-gray-600">
+                      <button onClick={() => setViewMode('documents')} className="hover:text-gray-900">Папки</button>
+                      {activeFolder && (
+                        <>
+                          <ChevronRight size={14} className="text-gray-400" />
+                          <button onClick={() => setActiveFolderId(activeFolder.id)} className="hover:text-gray-900 font-medium">{activeFolder.name}</button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {(viewMode === 'documents' || viewMode === 'home') && activeFolder && (
                     <span className="text-xs text-gray-400 bg-gray-100 px-2.5 py-1 rounded-full">
                       {activeFolder.document_type}
                     </span>
                   )}
-                  <button
-                    onClick={() => setShowNewDoc(true)}
-                    className="bg-brand hover:bg-brand-hover active:bg-brand-active transition-colors text-ink font-semibold px-4 py-1.5 rounded-full text-sm flex items-center gap-2"
-                  >
-                    <Plus size={15} />
-                    Создать
-                  </button>
+                  {(viewMode === 'documents' || viewMode === 'home') && (
+                    <button
+                      onClick={() => setShowNewDoc(true)}
+                      className="bg-brand hover:bg-brand-hover active:bg-brand-active transition-colors text-ink font-semibold px-4 py-1.5 rounded-full text-sm flex items-center gap-2"
+                    >
+                      <Plus size={15} />
+                      Создать
+                    </button>
+                  )}
 
-                  <input
-                    ref={uploadInputRef}
-                    type="file"
-                    accept=".docx,.pdf"
-                    onChange={handleUploadFile}
-                    className="hidden"
-                  />
-                  <button
-                    onClick={() => uploadInputRef.current?.click()}
-                    disabled={uploading}
-                    className="border border-gray-200 hover:border-gray-300 hover:bg-gray-50 transition-colors text-gray-700 font-semibold px-4 py-1.5 rounded-full text-sm flex items-center gap-2 disabled:opacity-50"
-                  >
-                    <Upload size={15} />
-                    {uploading ? 'Загрузка...' : 'Загрузить'}
-                  </button>
+                  {(viewMode === 'documents' || viewMode === 'home') && (
+                    <>
+                      <input
+                        ref={uploadInputRef}
+                        type="file"
+                        accept=".docx,.pdf"
+                        onChange={handleUploadFile}
+                        className="hidden"
+                      />
+                      <button
+                        onClick={() => uploadInputRef.current?.click()}
+                        disabled={uploading}
+                        className="border border-gray-200 hover:border-gray-300 hover:bg-gray-50 transition-colors text-gray-700 font-semibold px-4 py-1.5 rounded-full text-sm flex items-center gap-2 disabled:opacity-50"
+                      >
+                        <Upload size={15} />
+                        {uploading ? 'Загрузка...' : 'Загрузить'}
+                      </button>
+                    </>
+                  )}
                 </div>
 
-                <div className="relative">
-                  <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-                  <input
-                    type="text"
-                    placeholder="Поиск документов"
-                    value={search}
-                    onChange={e => setSearch(e.target.value)}
-                    className="pl-9 pr-4 py-2 border border-gray-200 rounded-full text-sm w-64 focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
-                  />
+                <div className="flex items-center gap-4">
+                  {(viewMode === 'documents' || viewMode === 'home') && (
+                    <div className="relative">
+                      <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                      <input
+                        type="text"
+                        placeholder="Поиск документов"
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        className="pl-9 pr-4 py-2 border border-gray-200 rounded-full text-sm w-64 focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 border border-gray-200 rounded-lg p-1">
+                  <button
+                    onClick={() => setViewMode('home')}
+                    className={`p-1.5 rounded transition-colors ${viewMode === 'home' ? 'bg-gray-100 text-gray-700' : 'text-gray-400 hover:text-gray-600'}`}
+                    title="Домашняя"
+                  >
+                    <FileText size={16} />
+                  </button>
+                  <button
+                    onClick={() => { setViewMode('documents'); setActiveFolderId(null) }}
+                    className={`p-1.5 rounded transition-colors ${viewMode === 'documents' ? 'bg-gray-100 text-gray-700' : 'text-gray-400 hover:text-gray-600'}`}
+                    title="Все документы"
+                  >
+                    <List size={16} />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('folders')}
+                    className={`p-1.5 rounded transition-colors ${viewMode === 'folders' ? 'bg-gray-100 text-gray-700' : 'text-gray-400 hover:text-gray-600'}`}
+                    title="Вид папок"
+                  >
+                    <Grid3x3 size={16} />
+                  </button>
                 </div>
               </div>
 
               {/* Body */}
               <div className="flex-1 overflow-y-auto px-8 pb-8">
-                {(loading || folderLoading) ? (
-                  <div className="flex items-center justify-center h-40 text-gray-400 text-sm">Загрузка...</div>
-                ) : displayed.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-40 gap-2">
-                    <p className="text-gray-400 text-sm">
-                      {search ? 'Ничего не найдено' : activeFolderId ? 'Папка пуста' : 'Документов пока нет'}
-                    </p>
-                  </div>
-                ) : (
-                  <>
-                    {todayDocs.length > 0 && (
-                      <section className="mb-8">
-                        <h2 className="text-sm text-gray-500 mb-4">Сегодня</h2>
-                        <div className="grid grid-cols-4 gap-4">
-                          {todayDocs.map(doc => (
-                            <DocCard key={doc.id} doc={doc} {...cardProps} onClick={() => router.push(`/documents/${doc.id}`)} />
-                          ))}
-                        </div>
-                      </section>
+                {viewMode === 'home' ? (
+                  // Home view — folder cards + recent docs
+                  <div className="py-6 flex flex-col gap-8">
+                    {loading ? (
+                      <div className="flex items-center justify-center h-40 text-gray-400 text-sm">Загрузка...</div>
+                    ) : (
+                      <>
+                        {/* Folder cards row */}
+                        {folders.length > 0 && (
+                          <div>
+                            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-4">Типы документов</h3>
+                            <div className="flex gap-4 overflow-x-auto pb-2 -mx-1 px-1">
+                              {folders.map(folder => {
+                                const count = documents.filter(d => d.folder_id === folder.id).length
+                                const color = resolveFolderColor(folder)
+                                return (
+                                  <div
+                                    key={folder.id}
+                                    onClick={() => { setActiveFolderId(folder.id); setViewMode('documents') }}
+                                    className="relative flex-shrink-0 w-56 border border-gray-200 rounded-xl p-5 cursor-pointer hover:shadow-md hover:border-gray-300 transition-all group"
+                                  >
+                                    <div className="flex items-start justify-between mb-3">
+                                      <h4 className="font-semibold text-ink text-sm leading-snug pr-4">{folder.name}</h4>
+                                      <button
+                                        onClick={e => { e.stopPropagation(); setFolderMenuId(folderMenuId === folder.id ? null : folder.id) }}
+                                        className="p-1 rounded hover:bg-gray-100 text-gray-400 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                                      >
+                                        <MoreHorizontal size={15} />
+                                      </button>
+                                    </div>
+                                    <p className="text-xs text-gray-400 mb-4">{count} {count === 1 ? 'документ' : count < 5 ? 'документа' : 'документов'}</p>
+                                    {/* Colored bottom bar matching screenshot */}
+                                    <div className="h-1 rounded-full" style={{ backgroundColor: color }} />
+
+                                    {/* Context menu */}
+                                    {folderMenuId === folder.id && (
+                                      <div
+                                        className="absolute right-2 top-10 bg-white border border-gray-200 rounded-lg shadow-lg z-20 py-1 w-40"
+                                        onClick={e => e.stopPropagation()}
+                                      >
+                                        {editingFolderId === folder.id ? (
+                                          <div className="flex items-center gap-1 px-3 py-2">
+                                            <input
+                                              autoFocus
+                                              value={editFolderName}
+                                              onChange={e => setEditFolderName(e.target.value)}
+                                              onKeyDown={e => {
+                                                if (e.key === 'Enter') handleRenameFolder(folder.id)
+                                                if (e.key === 'Escape') { setEditingFolderId(null); setFolderMenuId(null) }
+                                              }}
+                                              className="flex-1 text-sm border-b border-brand outline-none bg-transparent min-w-0"
+                                            />
+                                            <button onClick={() => handleRenameFolder(folder.id)} className="text-brand-hover flex-shrink-0"><Check size={12} /></button>
+                                            <button onClick={() => { setEditingFolderId(null); setFolderMenuId(null) }} className="text-gray-400 flex-shrink-0"><X size={12} /></button>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            onClick={e => { e.stopPropagation(); setEditingFolderId(folder.id); setEditFolderName(folder.name) }}
+                                            className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 w-full text-left"
+                                          >
+                                            <Pencil size={13} /> Переименовать
+                                          </button>
+                                        )}
+                                        <button
+                                          onClick={e => { e.stopPropagation(); handleDeleteFolder(folder.id) }}
+                                          className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 w-full text-left"
+                                        >
+                                          <Trash2 size={13} /> Удалить
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Recent documents (unassigned first, then by date) */}
+                        {documents.filter(d => !d.folder_id).length > 0 && (
+                          <section>
+                            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-4">Без папки</h3>
+                            <div className="grid grid-cols-4 gap-4">
+                              {documents.filter(d => !d.folder_id).map(doc => (
+                                <DocCard key={doc.id} doc={doc} {...cardProps} onClick={() => router.push(`/documents/${doc.id}`)} />
+                              ))}
+                            </div>
+                          </section>
+                        )}
+
+                        {todayDocs.length > 0 && (
+                          <section>
+                            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-4">Сегодня</h3>
+                            <div className="grid grid-cols-4 gap-4">
+                              {todayDocs.map(doc => (
+                                <DocCard key={doc.id} doc={doc} {...cardProps} onClick={() => router.push(`/documents/${doc.id}`)} />
+                              ))}
+                            </div>
+                          </section>
+                        )}
+
+                        {earlierDocs.length > 0 && (
+                          <section>
+                            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-4">Ранее</h3>
+                            <div className="grid grid-cols-4 gap-4">
+                              {earlierDocs.map(doc => (
+                                <DocCard key={doc.id} doc={doc} {...cardProps} onClick={() => router.push(`/documents/${doc.id}`)} />
+                              ))}
+                            </div>
+                          </section>
+                        )}
+
+                        {documents.length === 0 && folders.length === 0 && (
+                          <div className="flex flex-col items-center justify-center h-40 gap-2">
+                            <p className="text-gray-400 text-sm">Документов пока нет</p>
+                          </div>
+                        )}
+                      </>
                     )}
-                    {earlierDocs.length > 0 && (
-                      <section>
-                        <h2 className="text-sm text-gray-500 mb-4">Ранее</h2>
+                  </div>
+                ) : viewMode === 'folders' ? (
+                  // Folders view
+                  <>
+                    {loading ? (
+                      <div className="flex items-center justify-center h-40 text-gray-400 text-sm">Загрузка...</div>
+                    ) : folders.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center h-40 gap-2">
+                        <p className="text-gray-400 text-sm">Папок пока нет</p>
+                      </div>
+                    ) : (
+                      <div className="pt-6">
                         <div className="grid grid-cols-4 gap-4">
-                          {earlierDocs.map(doc => (
-                            <DocCard key={doc.id} doc={doc} {...cardProps} onClick={() => router.push(`/documents/${doc.id}`)} />
+                          {folders.map(folder => (
+                            <div key={folder.id} className="border border-gray-200 rounded-xl p-6 flex flex-col items-center justify-center text-center relative hover:border-gray-300 hover:shadow-sm transition-all cursor-pointer min-h-[160px] group" onClick={() => handleFolderClick(folder.id)}>
+                              <div className="w-16 h-16 rounded-xl flex items-center justify-center mb-4 transition-colors" style={{ backgroundColor: `${resolveFolderColor(folder)}18` }}>
+                                <Folder size={32} style={{ color: resolveFolderColor(folder) }} />
+                              </div>
+                              <p className="text-sm font-semibold text-ink line-clamp-2">{folder.name}</p>
+                              <p className="text-xs text-gray-400 mt-2">{folder.document_type}</p>
+
+                              <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  onClick={e => { e.stopPropagation(); setFolderMenuId(folderMenuId === folder.id ? null : folder.id) }}
+                                  className="p-1.5 rounded hover:bg-gray-200 text-gray-400 transition-colors"
+                                >
+                                  <MoreHorizontal size={16} />
+                                </button>
+
+                                {folderMenuId === folder.id && (
+                                  <div className="absolute right-0 top-8 bg-white border border-gray-200 rounded-lg shadow-lg z-20 py-1 w-40">
+                                    <button
+                                      onClick={e => { e.stopPropagation(); setColorPickerFolderId(folder.id); setPendingColor(resolveFolderColor(folder)); setFolderMenuId(null) }}
+                                      className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 w-full text-left"
+                                    >
+                                      <Palette size={13} /> Изменить цвет
+                                    </button>
+                                    <button
+                                      onClick={e => { e.stopPropagation(); setEditingFolderId(folder.id); setEditFolderName(folder.name); setFolderMenuId(null) }}
+                                      className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 w-full text-left"
+                                    >
+                                      <Pencil size={13} /> Переименовать
+                                    </button>
+                                    <button
+                                      onClick={e => { e.stopPropagation(); handleDeleteFolder(folder.id) }}
+                                      className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 w-full text-left"
+                                    >
+                                      <Trash2 size={13} /> Удалить
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+
+                              {colorPickerFolderId === folder.id && (
+                                <div
+                                  className="absolute right-0 top-0 bg-white border border-gray-200 rounded-xl shadow-xl z-30 p-4 w-72 mr-1"
+                                  onClick={e => e.stopPropagation()}
+                                >
+                                  <FolderColorPicker
+                                    selectedColor={pendingColor}
+                                    previewName={folder.name}
+                                    previewDocType={folder.document_type}
+                                    onSelect={hex => setPendingColor(hex)}
+                                  />
+                                  <div className="flex gap-2 mt-3">
+                                    <button
+                                      onClick={() => setColorPickerFolderId(null)}
+                                      className="flex-1 border border-gray-200 text-gray-600 text-xs py-1.5 rounded-full hover:bg-gray-50"
+                                    >Отмена</button>
+                                    <button
+                                      onClick={() => handleChangeColor(folder.id, pendingColor)}
+                                      className="flex-1 bg-brand hover:bg-brand-hover text-ink text-xs font-semibold py-1.5 rounded-full"
+                                    >Сохранить</button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {editingFolderId === folder.id && (
+                                <div className="absolute inset-0 bg-white rounded-xl flex items-center justify-center">
+                                  <input
+                                    autoFocus
+                                    value={editFolderName}
+                                    onChange={e => setEditFolderName(e.target.value)}
+                                    onKeyDown={e => {
+                                      if (e.key === 'Enter') handleRenameFolder(folder.id)
+                                      if (e.key === 'Escape') setEditingFolderId(null)
+                                    }}
+                                    className="text-sm border-b border-brand outline-none bg-transparent px-2 w-4/5"
+                                  />
+                                  <button onClick={() => handleRenameFolder(folder.id)} className="text-brand-hover flex-shrink-0 ml-1">
+                                    <Check size={13} />
+                                  </button>
+                                  <button onClick={() => setEditingFolderId(null)} className="text-gray-400 flex-shrink-0">
+                                    <X size={13} />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
                           ))}
                         </div>
-                      </section>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  // Documents view
+                  <>
+                    {(loading || folderLoading) ? (
+                      <div className="flex items-center justify-center h-40 text-gray-400 text-sm">Загрузка...</div>
+                    ) : displayed.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center h-40 gap-2">
+                        <p className="text-gray-400 text-sm">
+                          {search ? 'Ничего не найдено' : activeFolderId ? 'Папка пуста' : 'Документов пока нет'}
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        {todayDocs.length > 0 && (
+                          <section className="mb-8">
+                            <h2 className="text-sm text-gray-500 mb-4">Сегодня</h2>
+                            <div className="grid grid-cols-4 gap-4">
+                              {todayDocs.map(doc => (
+                                <DocCard key={doc.id} doc={doc} {...cardProps} onClick={() => router.push(`/documents/${doc.id}`)} />
+                              ))}
+                            </div>
+                          </section>
+                        )}
+                        {earlierDocs.length > 0 && (
+                          <section>
+                            <h2 className="text-sm text-gray-500 mb-4">Ранее</h2>
+                            <div className="grid grid-cols-4 gap-4">
+                              {earlierDocs.map(doc => (
+                                <DocCard key={doc.id} doc={doc} {...cardProps} onClick={() => router.push(`/documents/${doc.id}`)} />
+                              ))}
+                            </div>
+                          </section>
+                        )}
+                      </>
                     )}
                   </>
                 )}

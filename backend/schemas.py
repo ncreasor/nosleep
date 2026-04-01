@@ -141,11 +141,13 @@ class FolderCreate(BaseModel):
     name: str
     document_type: str
     description: str | None = None
+    color: str | None = None
 
 
 class FolderUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    color: str | None = None
 
 
 class FolderResponse(BaseModel):
@@ -154,6 +156,7 @@ class FolderResponse(BaseModel):
     name: str
     document_type: str
     description: str | None = None
+    color: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -22,6 +22,7 @@ async def create_folder(
         name=folder_data.name,
         document_type=folder_data.document_type,
         description=folder_data.description,
+        color=folder_data.color,
     )
     db.add(new_folder)
     await db.commit()
@@ -81,6 +82,8 @@ async def update_folder(
         folder.name = folder_data.name
     if folder_data.description is not None:
         folder.description = folder_data.description
+    if folder_data.color is not None:
+        folder.color = folder_data.color
 
     await db.commit()
     await db.refresh(folder)
