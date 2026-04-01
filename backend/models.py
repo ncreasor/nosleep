@@ -11,6 +11,7 @@ class Folder(Base):
     name = Column(String, index=True)
     document_type = Column(String, index=True)  # e.g., "invoice", "lawsuit", "contract"
     description = Column(Text, nullable=True)
+    color = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

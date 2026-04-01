@@ -2,7 +2,7 @@ import os
 import uuid
 import asyncio
 from pathlib import Path
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +48,7 @@ def check_file_valid(filename: str, size_bytes: int) -> str:
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     file: UploadFile = File(...),
+    folder_id: int | None = Form(None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -67,6 +68,7 @@ async def upload_document(
 
     doc = Document(
         user_id=current_user.id,
+        folder_id=folder_id,
         title=file.filename,
         filename=file.filename,
         file_path=str(file_path),
