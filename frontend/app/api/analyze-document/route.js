@@ -88,7 +88,16 @@ If no legal norms are found, return {"articles": []}.`,
       return Response.json({ articles: [] })
     }
 
-    return Response.json({ articles: jsonResponse.articles })
+    // Normalize string "null" to actual null values
+    const normalized = jsonResponse.articles.map(article => {
+      const norm = { ...article }
+      if (norm.introduced === 'null') norm.introduced = null
+      if (norm.replaced_by === 'null') norm.replaced_by = null
+      if (norm.deleted_at === 'null') norm.deleted_at = null
+      return norm
+    })
+
+    return Response.json({ articles: normalized })
   } catch (error) {
     console.error('Document analysis error:', error)
     return Response.json({ error: error.message }, { status: 500 })

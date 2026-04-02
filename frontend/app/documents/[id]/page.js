@@ -15,24 +15,40 @@ const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
 function highlightArticlesInDom(container, articles) {
   if (!container || !articles || articles.length === 0) return
 
-  let html = container.innerHTML
-  const originalHtml = html
-
   // Sort by norm_text length (longest first) to avoid partial replacements
   const sortedArticles = [...articles].sort((a, b) => b.norm_text.length - a.norm_text.length)
 
   for (const article of sortedArticles) {
-    const normText = article.norm_text
-    // Escape special regex chars in norm_text
-    const escaped = normText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const regex = new RegExp(`(${escaped})(?!<)`, 'g')
+    // Use TreeWalker to walk through text nodes only (not HTML tags)
+    const walker = document.createTreeWalker(
+      container,
+      NodeFilter.SHOW_TEXT,
+      null,
+      false
+    )
 
-    const statusClass = `norm-${article.status}`
-    html = html.replace(regex, `<span data-norm="${normText}" class="norm-highlight ${statusClass}">$1</span>`)
-  }
+    let textNode
+    while ((textNode = walker.nextNode())) {
+      const idx = textNode.nodeValue.indexOf(article.norm_text)
+      if (idx === -1) continue
 
-  if (html !== originalHtml) {
-    container.innerHTML = html
+      // Split the text node:
+      // Before match | match | after match
+      const matchNode = textNode.splitText(idx)
+      matchNode.splitText(article.norm_text.length)
+
+      // Create span for the matched text
+      const span = document.createElement('span')
+      span.setAttribute('data-norm', article.norm_text)
+      span.className = `norm-highlight norm-${article.status}`
+
+      // Insert span before matchNode and move matchNode inside it
+      matchNode.parentNode.insertBefore(span, matchNode)
+      span.appendChild(matchNode)
+
+      // Continue with next article (don't highlight same text twice)
+      break
+    }
   }
 }
 
