@@ -38,35 +38,36 @@ Return ONLY valid JSON, no markdown or explanation.`,
         },
         {
           role: 'user',
-          content: `Analyze the following document text and extract all references to Kazakhstan legal norms/articles.
-For each norm found, return an object with: norm_text, title, status, applicability, usage_context, introduced, amendments (array), replaced_by, deleted_at, current_status_explanation.
+          content: `CRITICAL: Extract ONLY legal norm references that are EXPLICITLY MENTIONED in the document text.
+Do NOT generate, invent, or hallucinate norms that are not in the text.
+Do NOT create fictional statutes like "статья 888" or "статья 777" if they don't appear in the document.
+
+Look for patterns like:
+- "ст. 293 ТК РК"
+- "статья 50 ТК РК"
+- "ст. 100 ГК РК"
+- "Закон РК от ..."
 
 Document text:
 ---
 ${truncated}
 ---
 
-Return as JSON array:
+For EACH reference explicitly found in the document, provide:
+- norm_text: exact reference as written in document
+- title, status, applicability, usage_context, introduced, amendments, replaced_by, deleted_at, current_status_explanation
+
+IMPORTANT: If the reference text doesn't actually exist as a real norm in Kazakhstan legislation, mark status as "invalid".
+
+Return as JSON:
 {
   "articles": [
-    {
-      "norm_text": "ст. 293 ТК РК",
-      "title": "Official article name in Russian",
-      "status": "valid|outdated|invalid",
-      "applicability": "How this norm applies to the document (1-2 sentences in Russian)",
-      "usage_context": "Where and how it's mentioned in the document (1-2 sentences in Russian)",
-      "introduced": "YYYY-MM-DD or null",
-      "amendments": [
-        { "date": "YYYY-MM-DD", "description": "What changed" }
-      ],
-      "replaced_by": "What replaced it or null",
-      "deleted_at": "YYYY-MM-DD or null",
-      "current_status_explanation": "1-2 sentences explaining current status in Russian"
-    }
+    { "norm_text": "ст. 293 ТК РК", ... }
   ]
 }
 
-If no legal norms are found, return {"articles": []}.`,
+If ZERO norms are explicitly mentioned in the document, return {"articles": []}.
+Do NOT invent any norms. Empty document = empty articles array.`,
         },
       ],
       temperature: 0.3,
