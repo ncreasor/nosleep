@@ -593,3 +593,178 @@ async def validate_articles_handler(request: ArticlesValidationRequest):
     except Exception as e:
         logger.error(f"Error validating articles: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class AnalyzeDocumentRequest(BaseModel):
+    document_text: str
+
+
+class CheckNormsRequest(BaseModel):
+    norms: list[str]
+
+
+@router.post("/analyze-legal-norms")
+async def analyze_legal_norms(request: AnalyzeDocumentRequest):
+    """
+    Analyze document and extract all legal norm references.
+    Uses GPT to intelligently identify Kazakhstan law articles and their context.
+    """
+    try:
+        if not request.document_text or not isinstance(request.document_text, str):
+            raise HTTPException(status_code=400, detail="document_text is required")
+
+        # Truncate to avoid excessive token usage
+        truncated = request.document_text[:4000]
+
+        response = client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are a legal document analyzer specializing in Kazakhstan legislation.
+You understand Kazakh legal codes: ГК РК (Civil Code), ТК РК (Labor Code), УК РК (Criminal Code),
+УПК РК, ГПК РК (Civil Procedure Code), КоАП РК, НК РК (Tax Code), ЗК РК (Land Code), ЖК РК (Housing Code), СК РК (Family Code).
+
+Your task: Read the provided document text and find ALL references to Kazakhstan legal norms/articles.
+For each reference found, provide comprehensive analysis including:
+- When the norm was introduced
+- All significant amendments with dates
+- Whether it was replaced (and by what)
+- Whether it was deleted
+- Current legal status (valid/outdated/invalid)
+- How this norm applies to the given document (applicability)
+- Where and in what context it is mentioned in the document (usage_context)
+
+Return ONLY valid JSON, no markdown or explanation.""",
+                },
+                {
+                    "role": "user",
+                    "content": f"""CRITICAL: Extract ONLY legal norm references that are EXPLICITLY MENTIONED in the document text.
+Do NOT generate, invent, or hallucinate norms that are not in the text.
+Do NOT create fictional statutes like "статья 888" or "статья 777" if they don't appear in the document.
+
+Look for patterns like:
+- "ст. 293 ТК РК"
+- "статья 50 ТК РК"
+- "ст. 100 ГК РК"
+- "Закон РК от ..."
+
+Document text:
+---
+{truncated}
+---
+
+For EACH reference explicitly found in the document, provide:
+- norm_text: exact reference as written in document
+- title, status, applicability, usage_context, introduced, amendments, replaced_by, deleted_at, current_status_explanation
+
+IMPORTANT: If the reference text doesn't actually exist as a real norm in Kazakhstan legislation, mark status as "invalid".
+
+Return as JSON:
+{{
+  "articles": [
+    {{ "norm_text": "ст. 293 ТК РК", ... }}
+  ]
+}}
+
+If ZERO norms are explicitly mentioned in the document, return {{"articles": []}}.
+Do NOT invent any norms. Empty document = empty articles array.""",
+                },
+            ],
+            temperature=0.3,
+            max_tokens=3000,
+        )
+
+        content = response.choices[0].message.content.strip()
+
+        try:
+            json_response = json.loads(content)
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse GPT response: {content}")
+            return {"articles": []}
+
+        # Validate response structure
+        if not json_response.get("articles") or not isinstance(json_response["articles"], list):
+            return {"articles": []}
+
+        # Load Kazakhstan laws database for validation
+        try:
+            from laws_validator import validate_articles as validate_articles_fn
+
+            validated = validate_articles_fn(json_response["articles"])
+            return {"articles": validated}
+        except Exception as e:
+            logger.warning(f"Could not validate against laws database: {e}")
+            return json_response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error analyzing legal norms: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/check-norms")
+async def check_norms(request: CheckNormsRequest):
+    """
+    Check legal norm references for details, amendments, status, etc.
+    Returns comprehensive information for each norm including chronology and related laws.
+    """
+    try:
+        if not request.norms or not isinstance(request.norms, list):
+            return {"results": {}}
+
+        norms_text = '\n'.join([f'{i + 1}. "{n}"' for i, n in enumerate(request.norms)])
+
+        response = client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are a legal reference system specializing in the legislation of the Republic of Kazakhstan (RK/РК).
+You have knowledge of Kazakh legal codes: ГК РК (Civil Code), ТК РК (Labor Code), УК РК (Criminal Code),
+УПК РК, ГПК РК (Civil Procedure Code), КоАП РК, НК РК (Tax Code), ЗК РК (Land Code), ЖК РК (Housing Code), СК РК (Family Code).
+
+For each legal norm reference provided, return a JSON object with:
+- "status": one of "valid" (norm exists and is in force), "outdated" (norm exists but has been superseded or amended, or is from an old version), "invalid" (norm does not exist)
+- "title": the official name/title of the article or law, null if unknown
+- "introduced": ISO date string (YYYY-MM-DD) when the norm was first introduced, null if unknown
+- "amendments": array of { "date": "YYYY-MM-DD", "description": "brief description in Russian" }, max 5, empty if none
+- "current_status_explanation": 1-2 sentences in Russian explaining the current status
+- "status_since": ISO date string (YYYY-MM-DD) when norm acquired its current status, null if unknown
+- "replaced_by": string describing what replaced this norm (if status is "outdated"), null otherwise
+- "is_latest_amendment": boolean true if using latest version, false if using older version
+- "analysis": 2-3 sentence description in Russian of what this norm regulates, its scope, and who it applies to
+- "related_laws": array of max 3 objects { "title": "official name", "number": "code abbreviation", "relevance": "brief explanation" } of related laws in the same domain
+- "formulation_issues": array of max 3 objects { "type": "category", "description": "common mistake in Russian", "suggestion": "how to fix it" } - common errors when citing this norm in contracts/documents
+
+Respond ONLY with valid JSON. No markdown, no explanation outside JSON.""",
+                },
+                {
+                    "role": "user",
+                    "content": f"""Check the following legal norm references from Kazakh legislation. For each, return a comprehensive analysis including status, title, chronology, detailed explanation, related laws, and common formulation issues.
+
+Norms to check:
+{norms_text}
+
+Return as JSON object where each key is the norm reference text (exactly as provided):
+{{ "norm1": {{ status, title, introduced, amendments, current_status_explanation, status_since, replaced_by, is_latest_amendment, analysis, related_laws, formulation_issues }}, "norm2": {{...}} }}""",
+                },
+            ],
+            temperature=0.3,
+            max_tokens=2000,
+        )
+
+        content = response.choices[0].message.content.strip()
+
+        try:
+            json_response = json.loads(content)
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse norm check response: {content}")
+            return {"results": {}}
+
+        return {"results": json_response}
+
+    except Exception as e:
+        logger.error(f"Error checking norms: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
