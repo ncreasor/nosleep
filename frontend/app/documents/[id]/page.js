@@ -94,6 +94,7 @@ export default function DocumentEditorPage() {
   const titleSaveTimeout = useRef(null)
   const contentSaveTimeout = useRef(null)
   const savedTitleRef = useRef('')
+  const analyzedRef = useRef(false)
 
   // Load document metadata and analysis
   useEffect(() => {
@@ -136,20 +137,14 @@ export default function DocumentEditorPage() {
 
   // Load content: localStorage first, then backend text endpoint for PDFs
   useEffect(() => {
-    if (loading || !editorRef.current) return
-
-    const processContent = (text) => {
-      if (!editorRef.current) return
-
-      // Analyze document with AI to find legal norms
-      analyzeDocument(text)
-    }
+    if (loading || !editorRef.current || analyzedRef.current) return
 
     const saved = localStorage.getItem(`doc-content-${id}`)
     if (saved) {
       editorRef.current.innerHTML = saved
       updateWordCount()
-      processContent(editorRef.current.innerText)
+      analyzedRef.current = true
+      analyzeDocument(editorRef.current.innerText)
       return
     }
 
@@ -166,7 +161,8 @@ export default function DocumentEditorPage() {
         editorRef.current.innerHTML = html
         localStorage.setItem(`doc-content-${id}`, html)
         updateWordCount()
-        processContent(raw)
+        analyzedRef.current = true
+        analyzeDocument(raw)
       })
       .catch(() => {})
   }, [loading, id, authHeaders])
