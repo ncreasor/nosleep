@@ -4,6 +4,9 @@ from pydantic import BaseModel, EmailStr
 
 class DocumentCreate(BaseModel):
     title: str
+    extracted_text: str | None = None
+    folder_id: int | None = None
+    filename: str | None = None
 
 
 class DocumentUpdate(BaseModel):

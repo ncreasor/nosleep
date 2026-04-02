@@ -16,56 +16,19 @@ const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
 const NORM_REGEX = /(?:(?:ч\.\s*\d+\s+)?(?:п\.\s*\d+(?:-\d+)?\s+)?ст\.\s*\d+(?:\.\d+)?\s+(?:ГК|ТК|УК|УПК|ГПК|КоАП|НК|ЖК|СК|КоИС|ЗК)\s+РК|[Сс]тать(?:я|и|ью?|ей)\s+\d+(?:\.\d+)?|Закон(?:\s+Республики\s+Казахстан|\s+РК)\s+от\s+[\d.]+\s+(?:года\s+)?№\s*[\d\-]+(?:-[IVX]+[ЗРК]*)?|ЗРК-\d+(?:-[IVX]+)?)/g
 
 function highlightNormsInDom(container) {
-  if (!container || container.querySelector('[data-norm]')) return
+  if (!container) return
 
-  const walker = document.createTreeWalker(
-    container,
-    NodeFilter.SHOW_TEXT,
-    null,
-    false
-  )
+  // Check if already highlighted
+  if (container.querySelector('[data-norm]')) return
 
-  const nodesToReplace = []
-  let node
+  const html = container.innerHTML
+  if (!html || !html.includes('ст.') && !html.includes('Закон')) return
 
-  while (node = walker.nextNode()) {
-    if (/\S/.test(node.nodeValue)) {
-      const matches = Array.from(node.nodeValue.matchAll(NORM_REGEX))
-      if (matches.length > 0) {
-        nodesToReplace.push({ node, matches })
-      }
-    }
-  }
-
-  nodesToReplace.forEach(({ node, matches }) => {
-    const fragment = document.createDocumentFragment()
-    let lastIndex = 0
-
-    matches.forEach(match => {
-      if (match.index > lastIndex) {
-        fragment.appendChild(
-          document.createTextNode(node.nodeValue.slice(lastIndex, match.index))
-        )
-      }
-
-      const span = document.createElement('span')
-      span.setAttribute('data-norm', match[0])
-      span.setAttribute('data-norm-status', 'pending')
-      span.className = 'norm-highlight norm-pending'
-      span.textContent = match[0]
-      fragment.appendChild(span)
-
-      lastIndex = match.index + match[0].length
-    })
-
-    if (lastIndex < node.nodeValue.length) {
-      fragment.appendChild(
-        document.createTextNode(node.nodeValue.slice(lastIndex))
-      )
-    }
-
-    node.parentNode.replaceChild(fragment, node)
+  let highlightedHtml = html.replace(NORM_REGEX, (match) => {
+    return `<span data-norm="${match}" data-norm-status="pending" class="norm-highlight norm-pending">${match}</span>`
   })
+
+  container.innerHTML = highlightedHtml
 }
 
 function SaveStatus({ status }) {
@@ -149,10 +112,26 @@ export default function DocumentEditorPage() {
   useEffect(() => {
     if (loading || !editorRef.current) return
 
+    const processContent = () => {
+      if (!editorRef.current) return
+
+      // Highlight norms
+      highlightNormsInDom(editorRef.current)
+
+      // Fetch norm statuses
+      const normSpans = editorRef.current.querySelectorAll('[data-norm]')
+      const uniqueNorms = Array.from(new Set(Array.from(normSpans).map(span => span.getAttribute('data-norm'))))
+
+      if (uniqueNorms.length > 0) {
+        fetchNormStatuses(uniqueNorms)
+      }
+    }
+
     const saved = localStorage.getItem(`doc-content-${id}`)
     if (saved) {
       editorRef.current.innerHTML = saved
       updateWordCount()
+      processContent()
       return
     }
 
@@ -169,23 +148,10 @@ export default function DocumentEditorPage() {
         editorRef.current.innerHTML = html
         localStorage.setItem(`doc-content-${id}`, html)
         updateWordCount()
+        processContent()
       })
       .catch(() => {})
-  }, [loading, id])
-
-  // Highlight norms and fetch their statuses
-  useEffect(() => {
-    if (!editorRef.current || loading) return
-
-    highlightNormsInDom(editorRef.current)
-
-    const normSpans = editorRef.current.querySelectorAll('[data-norm]')
-    const uniqueNorms = Array.from(new Set(Array.from(normSpans).map(span => span.getAttribute('data-norm'))))
-
-    if (uniqueNorms.length > 0) {
-      fetchNormStatuses(uniqueNorms)
-    }
-  }, [loading, id])
+  }, [loading, id, authHeaders])
 
   const fetchNormStatuses = async (uniqueNorms) => {
     const uncached = uniqueNorms.filter(n => !normCache.current[n])
@@ -347,61 +313,51 @@ export default function DocumentEditorPage() {
         <div className="flex-1 overflow-y-auto p-4">
           {activePanel === 'analysis' && (
             <div className="space-y-4">
-              {analysisLoading ? (
+              {normLoading ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 size={16} className="animate-spin text-gray-300" />
                 </div>
-              ) : !analysis ? (
-                <p className="text-xs text-gray-400">Анализ недоступен</p>
+              ) : Object.keys(normCache.current).length === 0 ? (
+                <p className="text-xs text-gray-400 text-center py-8">Нормы не найдены</p>
               ) : (
                 <>
-                  {/* Summary */}
-                  {analysis.summary && (
-                    <div className="p-3 bg-blue-50 rounded-lg border border-blue-100">
-                      <p className="text-xs text-blue-900">{analysis.summary}</p>
-                    </div>
-                  )}
-
-                  {/* Articles/Relations */}
+                  <div className="text-xs font-medium text-gray-600 uppercase tracking-wide">Найденные нормы</div>
                   <div className="space-y-2">
-                    {doc?.classification && (
-                      <div className={`p-3 rounded-lg border border-gray-200 ${getClassificationColor(doc.classification)}`}>
+                    {Object.entries(normCache.current).map(([normText, data], idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => {
+                          setSelectedNorm({ text: normText, data })
+                          setActivePanel('chronology')
+                        }}
+                        className={`p-3 rounded-lg border border-gray-200 hover:border-gray-300 cursor-pointer transition-colors ${
+                          data.status === 'valid' ? 'bg-green-50' :
+                          data.status === 'outdated' ? 'bg-gray-50' :
+                          'bg-red-50'
+                        }`}
+                      >
                         <div className="flex items-start gap-2">
                           <div
                             className="w-2 h-2 rounded-full mt-1 flex-shrink-0"
-                            style={{ backgroundColor: getClassificationDotColor(doc.classification) }}
+                            style={{
+                              backgroundColor:
+                                data.status === 'valid' ? '#10B981' :
+                                data.status === 'outdated' ? '#9CA3AF' :
+                                '#EF4444'
+                            }}
                           />
                           <div className="min-w-0 flex-1">
-                            <p className="text-xs font-medium text-gray-900">Классификация</p>
-                            <p className="text-xs text-gray-600 mt-0.5">{doc.classification}</p>
+                            <p className="text-xs font-medium text-gray-900 line-clamp-2">{normText}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {data.status === 'valid' ? '✅ Действует' :
+                               data.status === 'outdated' ? '⚠️ Устарела' :
+                               '❌ Не существует'}
+                            </p>
+                            {data.title && <p className="text-xs text-gray-500 mt-1 line-clamp-1">{data.title}</p>}
                           </div>
                         </div>
                       </div>
-                    )}
-
-                    {analysis?.relations && Array.isArray(analysis.relations) && analysis.relations.length > 0 && (
-                      <>
-                        <p className="text-xs font-medium text-gray-600 mt-4">Связанные статьи</p>
-                        {analysis.relations.slice(0, 5).map((relation, idx) => (
-                          <div key={idx} className="p-3 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors">
-                            <div className="flex items-start gap-2">
-                              <div
-                                className="w-2 h-2 rounded-full mt-1 flex-shrink-0"
-                                style={{ backgroundColor: getClassificationDotColor(relation.status || relation.classification) }}
-                              />
-                              <div className="min-w-0 flex-1">
-                                <p className="text-xs font-medium text-gray-900 line-clamp-2">{relation.name || relation.title}</p>
-                                {relation.description && <p className="text-xs text-gray-500 mt-1 line-clamp-2">{relation.description}</p>}
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </>
-                    )}
-
-                    {!analysis?.relations || analysis.relations.length === 0 ? (
-                      <p className="text-xs text-gray-400 text-center py-4">Данные не доступны</p>
-                    ) : null}
+                    ))}
                   </div>
                 </>
               )}

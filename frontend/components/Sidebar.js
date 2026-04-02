@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { FileText, BarChart3, Briefcase, HelpCircle, LogOut } from 'lucide-react'
+import { FileText, BarChart3, Folder, HelpCircle, LogOut } from 'lucide-react'
 import { useAuth } from './useAuth'
 
 export default function Sidebar() {
@@ -26,19 +26,22 @@ export default function Sidebar() {
 
   return (
     <div className="sidebar flex flex-col py-5 gap-6">
-      {/* Logo */}
+      {/* Logo + Company Name */}
       <div className="flex items-center px-3">
-        <Link href="/" className="flex items-center gap-3">
+        <Link href="/" className="flex items-center gap-3 flex-1">
           <img src="/inlawlogo.svg" alt="inLaw" className="w-10 h-10 rounded-xl flex-shrink-0" />
-          <span className="nav-label font-semibold text-sm text-gray-800">inLaw</span>
+          <div className="flex flex-col">
+            <span className="nav-label font-semibold text-sm text-gray-800">Company Name</span>
+            <span className="text-xs text-gray-400">Free plan</span>
+          </div>
         </Link>
       </div>
 
       {/* Nav */}
       <nav className="flex flex-col gap-1 px-3">
-        {navItem('/documents', <FileText size={20} />, 'Documents')}
-        {navItem('/statistics', <BarChart3 size={20} />, 'Statistics')}
-        {navItem('/projects', <Briefcase size={20} />, 'Projects')}
+        {navItem('/documents', <FileText size={20} />, 'Документы')}
+        {navItem('/templates', <Folder size={20} />, 'Шаблоны')}
+        {navItem('/statistics', <BarChart3 size={20} />, 'Статистика')}
       </nav>
 
       {/* Bottom */}
