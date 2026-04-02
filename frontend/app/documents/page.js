@@ -364,7 +364,7 @@ export default function DocumentsPage() {
       const res = await fetch(`${BACKEND}/folders`, {
         method: 'POST',
         headers: { ...authHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, document_type: docType }),
+        body: JSON.stringify({ name, document_type: docType, color }),
       })
       if (res.ok) {
         const folder = await res.json()
