@@ -7,10 +7,66 @@ import { useAuth } from '@/components/useAuth'
 import {
   ArrowLeft, Check, Loader2, Bold, Italic, Underline,
   List, ListOrdered, Heading1, Heading2, Minus, Redo, Undo,
-  ChevronRight, Trash2, MessageCircle, CheckCircle2,
+  ChevronRight, Trash2, MessageCircle, CheckCircle2, Scale,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
+
+// Regex patterns for legal norms (Kazakh legislation)
+const NORM_REGEX = /(?:(?:ч\.\s*\d+\s+)?(?:п\.\s*\d+(?:-\d+)?\s+)?ст\.\s*\d+(?:\.\d+)?\s+(?:ГК|ТК|УК|УПК|ГПК|КоАП|НК|ЖК|СК|КоИС|ЗК)\s+РК|[Сс]тать(?:я|и|ью?|ей)\s+\d+(?:\.\d+)?|Закон(?:\s+Республики\s+Казахстан|\s+РК)\s+от\s+[\d.]+\s+(?:года\s+)?№\s*[\d\-]+(?:-[IVX]+[ЗРК]*)?|ЗРК-\d+(?:-[IVX]+)?)/g
+
+function highlightNormsInDom(container) {
+  if (!container || container.querySelector('[data-norm]')) return
+
+  const walker = document.createTreeWalker(
+    container,
+    NodeFilter.SHOW_TEXT,
+    null,
+    false
+  )
+
+  const nodesToReplace = []
+  let node
+
+  while (node = walker.nextNode()) {
+    if (/\S/.test(node.nodeValue)) {
+      const matches = Array.from(node.nodeValue.matchAll(NORM_REGEX))
+      if (matches.length > 0) {
+        nodesToReplace.push({ node, matches })
+      }
+    }
+  }
+
+  nodesToReplace.forEach(({ node, matches }) => {
+    const fragment = document.createDocumentFragment()
+    let lastIndex = 0
+
+    matches.forEach(match => {
+      if (match.index > lastIndex) {
+        fragment.appendChild(
+          document.createTextNode(node.nodeValue.slice(lastIndex, match.index))
+        )
+      }
+
+      const span = document.createElement('span')
+      span.setAttribute('data-norm', match[0])
+      span.setAttribute('data-norm-status', 'pending')
+      span.className = 'norm-highlight norm-pending'
+      span.textContent = match[0]
+      fragment.appendChild(span)
+
+      lastIndex = match.index + match[0].length
+    })
+
+    if (lastIndex < node.nodeValue.length) {
+      fragment.appendChild(
+        document.createTextNode(node.nodeValue.slice(lastIndex))
+      )
+    }
+
+    node.parentNode.replaceChild(fragment, node)
+  })
+}
 
 function SaveStatus({ status }) {
   if (status === 'saving') return (
@@ -57,11 +113,14 @@ export default function DocumentEditorPage() {
   const [activePanel, setActivePanel] = useState('analysis')
   const [analysis, setAnalysis] = useState(null)
   const [analysisLoading, setAnalysisLoading] = useState(false)
+  const [selectedNorm, setSelectedNorm] = useState(null)
+  const [normLoading, setNormLoading] = useState(false)
 
   const editorRef = useRef(null)
   const titleSaveTimeout = useRef(null)
   const contentSaveTimeout = useRef(null)
   const savedTitleRef = useRef('')
+  const normCache = useRef({})
 
   // Load document metadata and analysis
   useEffect(() => {
@@ -113,6 +172,56 @@ export default function DocumentEditorPage() {
       })
       .catch(() => {})
   }, [loading, id])
+
+  // Highlight norms and fetch their statuses
+  useEffect(() => {
+    if (!editorRef.current || loading) return
+
+    highlightNormsInDom(editorRef.current)
+
+    const normSpans = editorRef.current.querySelectorAll('[data-norm]')
+    const uniqueNorms = Array.from(new Set(Array.from(normSpans).map(span => span.getAttribute('data-norm'))))
+
+    if (uniqueNorms.length > 0) {
+      fetchNormStatuses(uniqueNorms)
+    }
+  }, [loading, id])
+
+  const fetchNormStatuses = async (uniqueNorms) => {
+    const uncached = uniqueNorms.filter(n => !normCache.current[n])
+    if (uncached.length === 0) return
+
+    setNormLoading(true)
+    try {
+      const res = await fetch('/api/norm-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ norms: uncached })
+      })
+
+      if (!res.ok) throw new Error('Failed to fetch norm statuses')
+
+      const { results } = await res.json()
+
+      // Update cache
+      Object.assign(normCache.current, results)
+
+      // Update DOM classes
+      document.querySelectorAll('[data-norm]').forEach(span => {
+        const normText = span.getAttribute('data-norm')
+        const data = normCache.current[normText]
+        if (data) {
+          span.removeAttribute('data-norm-status')
+          span.classList.remove('norm-pending')
+          span.classList.add(`norm-${data.status}`)
+        }
+      })
+    } catch (error) {
+      console.error('Norm status fetch error:', error)
+    } finally {
+      setNormLoading(false)
+    }
+  }
 
   // Cmd/Ctrl+S
   useEffect(() => {
@@ -300,28 +409,106 @@ export default function DocumentEditorPage() {
           )}
 
           {activePanel === 'chronology' && (
-            <div className="space-y-3">
-              <div className="p-3 rounded-lg border border-gray-200 bg-gray-50">
-                <p className="text-xs font-medium text-gray-600 mb-2">История изменений</p>
-                <div className="space-y-2">
-                  {[
-                    { date: 'Сегодня', time: '14:32', action: 'Загружено' },
-                    { date: '1 апреля', time: '09:15', action: 'Отредактировано' },
-                    { date: '31 марта', time: '16:45', action: 'Создано' },
-                  ].map((entry, idx) => (
-                    <div key={idx} className="flex gap-2">
-                      <div className="flex flex-col items-center">
-                        <div className="w-2 h-2 rounded-full bg-brand" />
-                        {idx < 2 && <div className="w-px h-3 bg-gray-300" />}
-                      </div>
-                      <div className="pb-2">
-                        <p className="text-xs font-medium text-gray-900">{entry.action}</p>
-                        <p className="text-xs text-gray-500">{entry.date} в {entry.time}</p>
-                      </div>
-                    </div>
-                  ))}
+            <div className="space-y-4">
+              {!selectedNorm ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mb-3">
+                    <Scale size={18} className="text-gray-400" />
+                  </div>
+                  <p className="text-xs text-gray-500 font-medium">Кликните на выделенную норму</p>
+                  <p className="text-xs text-gray-400 mt-1">чтобы увидеть её историю</p>
                 </div>
-              </div>
+              ) : normLoading ? (
+                <div className="space-y-3 animate-pulse">
+                  <div className="h-6 bg-gray-100 rounded w-24" />
+                  <div className="h-4 bg-gray-100 rounded w-48" />
+                  <div className="h-3 bg-gray-100 rounded w-full mt-4" />
+                  <div className="h-3 bg-gray-100 rounded w-3/4" />
+                </div>
+              ) : selectedNorm.data ? (
+                <>
+                  {/* Status badge */}
+                  <div className="flex items-center gap-2">
+                    {(() => {
+                      const status = selectedNorm.data.status
+                      const labelMap = { valid: 'ДЕЙСТВУЕТ', outdated: 'УСТАРЕЛА', invalid: 'НЕ СУЩЕСТВУЕТ' }
+                      const classMap = {
+                        valid: 'bg-green-100 text-green-800',
+                        outdated: 'bg-gray-100 text-gray-800',
+                        invalid: 'bg-red-100 text-red-800'
+                      }
+                      return (
+                        <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${classMap[status] || classMap.valid}`}>
+                          {labelMap[status] || status}
+                        </span>
+                      )
+                    })()}
+                  </div>
+
+                  {/* Norm title */}
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900 leading-snug">
+                      {selectedNorm.data.title || selectedNorm.text}
+                    </p>
+                    {selectedNorm.data.title && (
+                      <p className="text-xs text-gray-400 mt-0.5">{selectedNorm.text}</p>
+                    )}
+                  </div>
+
+                  {/* Timeline */}
+                  {(() => {
+                    const entries = []
+                    if (selectedNorm.data.introduced) {
+                      entries.push({ date: selectedNorm.data.introduced, label: 'Введена', type: 'introduced' })
+                    }
+                    if (selectedNorm.data.amendments && Array.isArray(selectedNorm.data.amendments)) {
+                      selectedNorm.data.amendments.forEach(a => {
+                        entries.push({ date: a.date, label: a.description, type: 'amendment' })
+                      })
+                    }
+                    entries.sort((a, b) => a.date.localeCompare(b.date))
+
+                    return entries.length > 0 ? (
+                      <div className="border-t border-gray-100 pt-4">
+                        <p className="text-xs font-medium text-gray-500 mb-3 uppercase tracking-wide">Хронология</p>
+                        <div className="space-y-0">
+                          {entries.map((entry, idx) => (
+                            <div key={idx} className="flex gap-3">
+                              <div className="flex flex-col items-center">
+                                <div className={`w-2 h-2 rounded-full ${
+                                  entry.type === 'introduced' ? 'bg-blue-400' :
+                                  entry.type === 'amendment' ? 'bg-gray-400' :
+                                  'bg-green-500'
+                                } mt-1.5 flex-shrink-0`} />
+                                {idx < entries.length - 1 && <div className="w-px h-3 bg-gray-200" />}
+                              </div>
+                              <div className="pb-3 min-w-0">
+                                <p className="text-xs font-medium text-gray-800 leading-snug">{entry.label}</p>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  {new Date(entry.date).toLocaleDateString('ru-RU', {
+                                    day: 'numeric', month: 'long', year: 'numeric'
+                                  })}
+                                </p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null
+                  })()}
+
+                  {/* Explanation */}
+                  {selectedNorm.data.current_status_explanation && (
+                    <div className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                      <p className="text-xs text-gray-700 leading-relaxed">
+                        {selectedNorm.data.current_status_explanation}
+                      </p>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="text-xs text-gray-400 text-center py-4">Норма не найдена</p>
+              )}
             </div>
           )}
 
@@ -465,7 +652,16 @@ export default function DocumentEditorPage() {
                 suppressContentEditableWarning
                 onInput={handleContentInput}
                 onKeyUp={updateActiveFormats}
-                onMouseUp={updateActiveFormats}
+                onMouseUp={(e) => {
+                  updateActiveFormats()
+                  const span = e.target.closest('[data-norm]')
+                  if (span) {
+                    const normText = span.getAttribute('data-norm')
+                    const data = normCache.current[normText]
+                    setSelectedNorm({ text: normText, data })
+                    setActivePanel('chronology')
+                  }
+                }}
                 onSelect={updateActiveFormats}
                 data-placeholder="Начните вводить текст..."
                 className="editor-body outline-none min-h-[50vh] text-gray-800 text-base leading-7"
