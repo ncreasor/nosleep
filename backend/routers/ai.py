@@ -512,5 +512,63 @@ async def websocket_chat(websocket: WebSocket, chat_id: int):
             pass
 
 
+class ExplainErrorRequest(BaseModel):
+    error_title: str
+    original_text: str
+    suggestion: str
+    reason: str
+    document_context: str
+
+
+@router.post("/explain-error")
+async def explain_error(request: ExplainErrorRequest):
+    """Get detailed explanation of why a text is an error and how to fix it."""
+    try:
+        prompt = f"""You are a legal expert in Kazakh law. A user has found an error in a legal document.
+
+Error title: {request.error_title}
+Original text (incorrect): "{request.original_text}"
+Suggested correction: "{request.suggestion}"
+Reason: {request.reason}
+
+Document context (first part): {request.document_context[:1000]}
+
+Please provide:
+1. A detailed explanation (2-3 sentences) of why the original text is wrong in the context of Kazakh law
+2. A concrete example of how this error might affect the document
+3. Any relevant legal references or rules that apply
+
+Respond in Russian. Be concise and professional."""
+
+        response = client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert in Kazakh law and legal document analysis. Provide clear, professional explanations."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.5,
+            max_tokens=600,
+        )
+
+        explanation = response.choices[0].message.content.strip()
+
+        return {
+            "explanation": explanation,
+            "error_title": request.error_title,
+            "original_text": request.original_text,
+            "suggestion": request.suggestion
+        }
+
+    except Exception as e:
+        logger.error(f"Error explaining error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Import AsyncSessionLocal for WebSocket
 from database import AsyncSessionLocal

@@ -24,26 +24,29 @@ You have knowledge of Kazakh legal codes: ГК РК (Civil Code), ТК РК (Lab
 УПК РК, ГПК РК (Civil Procedure Code), КоАП РК, НК РК (Tax Code), ЗК РК (Land Code), ЖК РК (Housing Code), СК РК (Family Code).
 
 For each legal norm reference provided, return a JSON object with:
-- "status": one of "valid" (norm exists and is in force), "outdated" (norm exists but has been superseded or
-  amended in a way that changes its meaning substantially, or is from a version of the code that is no longer current),
-  "invalid" (norm does not exist — wrong article number, non-existent code, or repealed without replacement)
+- "status": one of "valid" (norm exists and is in force), "outdated" (norm exists but has been superseded or amended, or is from an old version), "invalid" (norm does not exist)
 - "title": the official name/title of the article or law, null if unknown
 - "introduced": ISO date string (YYYY-MM-DD) when the norm was first introduced, null if unknown
-- "amendments": array of { "date": "YYYY-MM-DD", "description": "brief description in Russian" },
-  maximum 5 most significant amendments, empty array if none or unknown
+- "amendments": array of { "date": "YYYY-MM-DD", "description": "brief description in Russian" }, max 5, empty if none
 - "current_status_explanation": 1-2 sentences in Russian explaining the current status
+- "status_since": ISO date string (YYYY-MM-DD) when norm acquired its current status, null if unknown
+- "replaced_by": string describing what replaced this norm (if status is "outdated"), null otherwise
+- "is_latest_amendment": boolean true if using latest version, false if using older version
+- "analysis": 2-3 sentence description in Russian of what this norm regulates, its scope, and who it applies to
+- "related_laws": array of max 3 objects { "title": "official name", "number": "code abbreviation", "relevance": "brief explanation" } of related laws in the same domain
+- "formulation_issues": array of max 3 objects { "type": "category", "description": "common mistake in Russian", "suggestion": "how to fix it" } - common errors when citing this norm in contracts/documents
 
-Respond ONLY with a valid JSON object where keys are norm reference texts exactly as provided. No markdown, no explanation outside JSON.`,
+Respond ONLY with valid JSON. No markdown, no explanation outside JSON.`,
         },
         {
           role: 'user',
-          content: `Check the following legal norm references from Kazakh legislation. For each, return an object with status, title, introduced date, amendments, and explanation.
+          content: `Check the following legal norm references from Kazakh legislation. For each, return a comprehensive analysis including status, title, chronology, detailed explanation, related laws, and common formulation issues.
 
 Norms to check:
 ${normsText}
 
 Return as JSON object where each key is the norm reference text (exactly as provided):
-{ "norm1": { status, title, introduced, amendments, current_status_explanation }, "norm2": {...} }`,
+{ "norm1": { status, title, introduced, amendments, current_status_explanation, status_since, replaced_by, is_latest_amendment, analysis, related_laws, formulation_issues }, "norm2": {...} }`,
         },
       ],
       temperature: 0.3,

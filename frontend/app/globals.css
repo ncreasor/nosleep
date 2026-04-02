@@ -100,6 +100,13 @@
   border-bottom: 2px solid #ef4444;
 }
 
+.norm-fixed {
+  background-color: rgba(173, 255, 94, 0.2);
+  border-bottom: 2px solid #adff5e;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
 html,
 body {
   max-width: 100vw;

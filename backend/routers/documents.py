@@ -1,15 +1,17 @@
 import os
 import uuid
 import asyncio
+import json
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
+from openai import OpenAI
 
 from database import get_db
 from models import Document, User, AuditLog
-from schemas import DocumentResponse, DocumentUpdate, DocumentSearchResult, DocumentAnalysis, DocumentInsights, DocumentCreate
+from schemas import DocumentResponse, DocumentUpdate, DocumentSearchResult, DocumentAnalysis, DocumentInsights, DocumentCreate, DocumentErrors
 from auth import get_current_user
 from config import settings
 from processing import (
@@ -418,3 +420,92 @@ async def forensic_analysis(
     forensic_report = DocumentForensics.analyze(doc.extracted_text, doc.file_path)
 
     return format_forensic_report(forensic_report)
+
+
+@router.get("/{document_id}/errors", response_model=DocumentErrors)
+async def get_document_errors(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Analyze document for legal errors: incorrect law references, outdated norms, formulation issues."""
+    result = await db.execute(
+        select(Document).where(Document.id == document_id)
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if not doc.extracted_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document not yet processed")
+
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    prompt = f"""Analyze this Kazakh legal document and find errors. Focus on:
+1. Incorrect or non-existent law references (wrong article numbers, laws that don't exist)
+2. Outdated norms used in the document (norms that have been replaced or are no longer valid)
+3. Formulation errors (ambiguous, incorrect, or outdated legal terminology)
+
+For each error found, return:
+- type: "law_ref" | "outdated" | "formulation"
+- title: short error label (1-2 words)
+- original_text: exact text from document that is wrong
+- suggestion: what it should be instead
+- reason: why this is an error (1-2 sentences in Russian)
+
+Return ONLY valid JSON in this format, no markdown, no explanation:
+{{
+  "summary": "brief 2-3 sentence summary of overall issues found",
+  "errors": [
+    {{"id": "e1", "type": "law_ref", "title": "Несуществующий закон", "original_text": "...", "suggestion": "...", "reason": "..."}},
+    ...
+  ]
+}}
+
+Document text:
+{doc.extracted_text[:8000]}"""
+
+    try:
+        response = client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert in Kazakh law. Analyze legal documents and identify errors. Always respond with valid JSON only."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.3,
+            max_tokens=2000,
+        )
+
+        content = response.choices[0].message.content.strip()
+
+        try:
+            data = json.loads(content)
+            return DocumentErrors(
+                summary=data.get("summary", ""),
+                errors=[
+                    {
+                        "id": e.get("id", f"e{i}"),
+                        "type": e.get("type", "formulation"),
+                        "title": e.get("title", "Ошибка"),
+                        "original_text": e.get("original_text", ""),
+                        "suggestion": e.get("suggestion", ""),
+                        "reason": e.get("reason", "")
+                    }
+                    for i, e in enumerate(data.get("errors", []))
+                ]
+            )
+        except json.JSONDecodeError:
+            return DocumentErrors(
+                summary="Не удалось проанализировать документ",
+                errors=[]
+            )
+
+    except Exception as e:
+        import logging
+        logging.error(f"Error analyzing document for errors: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

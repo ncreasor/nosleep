@@ -140,6 +140,20 @@ class DocumentInsights(BaseModel):
     key_terms: list[str]
 
 
+class DocumentError(BaseModel):
+    id: str
+    type: str
+    title: str
+    original_text: str
+    suggestion: str
+    reason: str
+
+
+class DocumentErrors(BaseModel):
+    summary: str
+    errors: list[DocumentError]
+
+
 class FolderCreate(BaseModel):
     name: str
     document_type: str
