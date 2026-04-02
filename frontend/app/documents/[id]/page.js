@@ -7,6 +7,7 @@ import { useAuth } from '@/components/useAuth'
 import {
   ArrowLeft, Check, Loader2, Bold, Italic, Underline,
   List, ListOrdered, Heading1, Heading2, Minus, Redo, Undo,
+  ChevronRight, Trash2, MessageCircle, CheckCircle2,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
@@ -53,13 +54,16 @@ export default function DocumentEditorPage() {
   const [loading, setLoading] = useState(true)
   const [wordCount, setWordCount] = useState(0)
   const [activeFormats, setActiveFormats] = useState({})
+  const [activePanel, setActivePanel] = useState('analysis')
+  const [analysis, setAnalysis] = useState(null)
+  const [analysisLoading, setAnalysisLoading] = useState(false)
 
   const editorRef = useRef(null)
   const titleSaveTimeout = useRef(null)
   const contentSaveTimeout = useRef(null)
   const savedTitleRef = useRef('')
 
-  // Load document metadata
+  // Load document metadata and analysis
   useEffect(() => {
     if (authLoading) return
     fetch(`${BACKEND}/documents/${id}`, { headers: authHeaders })
@@ -72,6 +76,14 @@ export default function DocumentEditorPage() {
         }
       })
       .finally(() => setLoading(false))
+
+    // Fetch analysis data
+    setAnalysisLoading(true)
+    fetch(`${BACKEND}/documents/${id}/analysis`, { headers: authHeaders })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => setAnalysis(data))
+      .catch(() => {})
+      .finally(() => setAnalysisLoading(false))
   }, [authLoading, id])
 
   // Load content: localStorage first, then backend text endpoint for PDFs
@@ -184,6 +196,168 @@ export default function DocumentEditorPage() {
     handleContentInput()
   }
 
+  function getClassificationColor(classification) {
+    if (!classification) return 'bg-gray-50'
+    if (classification.toLowerCase().includes('действи') || classification.toLowerCase().includes('valid')) return 'bg-green-50'
+    if (classification.toLowerCase().includes('устар') || classification.toLowerCase().includes('old')) return 'bg-gray-100'
+    if (classification.toLowerCase().includes('недейст') || classification.toLowerCase().includes('invalid')) return 'bg-red-50'
+    return 'bg-gray-50'
+  }
+
+  function getClassificationDotColor(classification) {
+    if (!classification) return '#D1D5DB'
+    if (classification.toLowerCase().includes('действи') || classification.toLowerCase().includes('valid')) return '#10B981'
+    if (classification.toLowerCase().includes('устар') || classification.toLowerCase().includes('old')) return '#9CA3AF'
+    if (classification.toLowerCase().includes('недейст') || classification.toLowerCase().includes('invalid')) return '#EF4444'
+    return '#D1D5DB'
+  }
+
+  function RightPanel() {
+    return (
+      <div className="w-80 bg-white border-l border-gray-200 flex flex-col overflow-hidden">
+        {/* Tabs */}
+        <div className="flex border-b border-gray-200 sticky top-0 bg-white">
+          {['analysis', 'chronology', 'formulation'].map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActivePanel(tab)}
+              className={`flex-1 py-3 text-xs font-medium transition-colors border-b-2 ${
+                activePanel === tab
+                  ? 'text-ink border-b-brand'
+                  : 'text-gray-500 border-b-transparent hover:text-gray-700'
+              }`}
+            >
+              {tab === 'analysis' && 'ИИ Анализ'}
+              {tab === 'chronology' && 'Хронология'}
+              {tab === 'formulation' && 'Формулировка'}
+            </button>
+          ))}
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-4">
+          {activePanel === 'analysis' && (
+            <div className="space-y-4">
+              {analysisLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 size={16} className="animate-spin text-gray-300" />
+                </div>
+              ) : !analysis ? (
+                <p className="text-xs text-gray-400">Анализ недоступен</p>
+              ) : (
+                <>
+                  {/* Summary */}
+                  {analysis.summary && (
+                    <div className="p-3 bg-blue-50 rounded-lg border border-blue-100">
+                      <p className="text-xs text-blue-900">{analysis.summary}</p>
+                    </div>
+                  )}
+
+                  {/* Articles/Relations */}
+                  <div className="space-y-2">
+                    {doc?.classification && (
+                      <div className={`p-3 rounded-lg border border-gray-200 ${getClassificationColor(doc.classification)}`}>
+                        <div className="flex items-start gap-2">
+                          <div
+                            className="w-2 h-2 rounded-full mt-1 flex-shrink-0"
+                            style={{ backgroundColor: getClassificationDotColor(doc.classification) }}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-medium text-gray-900">Классификация</p>
+                            <p className="text-xs text-gray-600 mt-0.5">{doc.classification}</p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {analysis?.relations && Array.isArray(analysis.relations) && analysis.relations.length > 0 && (
+                      <>
+                        <p className="text-xs font-medium text-gray-600 mt-4">Связанные статьи</p>
+                        {analysis.relations.slice(0, 5).map((relation, idx) => (
+                          <div key={idx} className="p-3 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors">
+                            <div className="flex items-start gap-2">
+                              <div
+                                className="w-2 h-2 rounded-full mt-1 flex-shrink-0"
+                                style={{ backgroundColor: getClassificationDotColor(relation.status || relation.classification) }}
+                              />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-xs font-medium text-gray-900 line-clamp-2">{relation.name || relation.title}</p>
+                                {relation.description && <p className="text-xs text-gray-500 mt-1 line-clamp-2">{relation.description}</p>}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+
+                    {!analysis?.relations || analysis.relations.length === 0 ? (
+                      <p className="text-xs text-gray-400 text-center py-4">Данные не доступны</p>
+                    ) : null}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {activePanel === 'chronology' && (
+            <div className="space-y-3">
+              <div className="p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <p className="text-xs font-medium text-gray-600 mb-2">История изменений</p>
+                <div className="space-y-2">
+                  {[
+                    { date: 'Сегодня', time: '14:32', action: 'Загружено' },
+                    { date: '1 апреля', time: '09:15', action: 'Отредактировано' },
+                    { date: '31 марта', time: '16:45', action: 'Создано' },
+                  ].map((entry, idx) => (
+                    <div key={idx} className="flex gap-2">
+                      <div className="flex flex-col items-center">
+                        <div className="w-2 h-2 rounded-full bg-brand" />
+                        {idx < 2 && <div className="w-px h-3 bg-gray-300" />}
+                      </div>
+                      <div className="pb-2">
+                        <p className="text-xs font-medium text-gray-900">{entry.action}</p>
+                        <p className="text-xs text-gray-500">{entry.date} в {entry.time}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activePanel === 'formulation' && (
+            <div className="space-y-3">
+              <div className="space-y-2">
+                {analysis?.errors && Array.isArray(analysis.errors) && analysis.errors.length > 0 ? (
+                  analysis.errors.slice(0, 5).map((error, idx) => (
+                    <div key={idx} className="p-3 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors">
+                      <p className="text-xs text-gray-900 mb-2">{error.text || error.description || error.message}</p>
+                      <div className="flex gap-2">
+                        <button className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-green-700 bg-green-50 rounded hover:bg-green-100 transition-colors">
+                          <CheckCircle2 size={12} />
+                          Принять
+                        </button>
+                        <button className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 rounded hover:bg-blue-100 transition-colors">
+                          <MessageCircle size={12} />
+                          Спросить
+                        </button>
+                        <button className="flex items-center justify-center px-2 py-1.5 text-xs font-medium text-gray-600 hover:text-red-600 hover:bg-red-50 rounded transition-colors">
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-gray-400 text-center py-8">Ошибки не найдены</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   if (authLoading || loading) {
     return (
       <div className="flex h-screen bg-gray-50">
@@ -199,8 +373,9 @@ export default function DocumentEditorPage() {
     <div className="flex h-screen bg-gray-50">
       <Sidebar />
 
-      <main className="flex-1 overflow-hidden min-w-0 py-4 pr-4">
-        <div className="rounded-2xl border border-gray-300 bg-white shadow-sm h-full flex flex-col overflow-hidden">
+      <main className="flex-1 overflow-hidden min-w-0 py-4 pr-4 flex flex-col">
+        <div className="rounded-2xl border border-gray-300 bg-white shadow-sm h-full flex flex-row overflow-hidden">
+          <div className="flex-1 flex flex-col overflow-hidden">
 
           {/* Top bar */}
           <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
@@ -298,6 +473,9 @@ export default function DocumentEditorPage() {
             </div>
           </div>
 
+          </div>
+
+          <RightPanel />
         </div>
       </main>
     </div>
