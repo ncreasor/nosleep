@@ -12,39 +12,28 @@ import {
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
 
-// Regex patterns for legal norms (Kazakh legislation)
-const NORM_REGEX = /(?:ст\.?\s*\d+(?:[–\-]\d+)?(?:\s+(?:ГК|ТК|УК|УПК|ГПК|КоАП|НК|ЖК|СК|КоИС|ЗК|ОК)\s+РК)?|статья\s+\d+|Закон\s+(?:Республики\s+Казахстан|\s+РК)\s+от\s+[\d.]+\s+(?:года\s+)?№\s*[\d–\-\s./]+|Закон\s+РК\s+от\s+[\d.]+\s+(?:года\s+)?№\s*[\d–\-\s./]+|(?:ГК|ТК|УК|УПК|ГПК|КоАП|НК|ЖК|СК|КоИС|ЗК|ОК)\s+РК)/gi
+function highlightArticlesInDom(container, articles) {
+  if (!container || !articles || articles.length === 0) return
 
-function highlightNormsInDom(container) {
-  if (!container) {
-    console.warn('[highlightNormsInDom] Container is null')
-    return
+  let html = container.innerHTML
+  const originalHtml = html
+
+  // Sort by norm_text length (longest first) to avoid partial replacements
+  const sortedArticles = [...articles].sort((a, b) => b.norm_text.length - a.norm_text.length)
+
+  for (const article of sortedArticles) {
+    const normText = article.norm_text
+    // Escape special regex chars in norm_text
+    const escaped = normText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const regex = new RegExp(`(${escaped})(?!<)`, 'g')
+
+    const statusClass = `norm-${article.status}`
+    html = html.replace(regex, `<span data-norm="${normText}" class="norm-highlight ${statusClass}">$1</span>`)
   }
 
-  // Check if already highlighted
-  if (container.querySelector('[data-norm]')) {
-    console.log('[highlightNormsInDom] Already highlighted')
-    return
+  if (html !== originalHtml) {
+    container.innerHTML = html
   }
-
-  const html = container.innerHTML
-  console.log('[highlightNormsInDom] HTML length:', html.length)
-  console.log('[highlightNormsInDom] First 200 chars:', html.substring(0, 200))
-  
-  if (!html) {
-    console.warn('[highlightNormsInDom] No HTML content')
-    return
-  }
-
-  const matches = html.match(NORM_REGEX)
-  console.log('[highlightNormsInDom] Found matches:', matches ? matches.length : 0, matches)
-
-  let highlightedHtml = html.replace(NORM_REGEX, (match) => {
-    console.log('[highlightNormsInDom] Highlighting match:', match)
-    return `<span data-norm="${match}" data-norm-status="pending" class="norm-highlight norm-pending">${match}</span>`
-  })
-
-  container.innerHTML = highlightedHtml
 }
 
 function SaveStatus({ status }) {
@@ -92,8 +81,9 @@ export default function DocumentEditorPage() {
   const [activePanel, setActivePanel] = useState('analysis')
   const [analysis, setAnalysis] = useState(null)
   const [analysisLoading, setAnalysisLoading] = useState(false)
-  const [selectedNorm, setSelectedNorm] = useState(null)
-  const [normLoading, setNormLoading] = useState(false)
+  const [articles, setArticles] = useState([])
+  const [articlesLoading, setArticlesLoading] = useState(false)
+  const [selectedArticle, setSelectedArticle] = useState(null)
   const [errors, setErrors] = useState([])
   const [errorsSummary, setErrorsSummary] = useState('')
   const [errorsLoading, setErrorsLoading] = useState(false)
@@ -104,7 +94,6 @@ export default function DocumentEditorPage() {
   const titleSaveTimeout = useRef(null)
   const contentSaveTimeout = useRef(null)
   const savedTitleRef = useRef('')
-  const normCache = useRef({})
 
   // Load document metadata and analysis
   useEffect(() => {
@@ -149,26 +138,18 @@ export default function DocumentEditorPage() {
   useEffect(() => {
     if (loading || !editorRef.current) return
 
-    const processContent = () => {
+    const processContent = (text) => {
       if (!editorRef.current) return
 
-      // Highlight norms
-      highlightNormsInDom(editorRef.current)
-
-      // Fetch norm statuses
-      const normSpans = editorRef.current.querySelectorAll('[data-norm]')
-      const uniqueNorms = Array.from(new Set(Array.from(normSpans).map(span => span.getAttribute('data-norm'))))
-
-      if (uniqueNorms.length > 0) {
-        fetchNormStatuses(uniqueNorms)
-      }
+      // Analyze document with AI to find legal norms
+      analyzeDocument(text)
     }
 
     const saved = localStorage.getItem(`doc-content-${id}`)
     if (saved) {
       editorRef.current.innerHTML = saved
       updateWordCount()
-      processContent()
+      processContent(editorRef.current.innerText)
       return
     }
 
@@ -185,44 +166,39 @@ export default function DocumentEditorPage() {
         editorRef.current.innerHTML = html
         localStorage.setItem(`doc-content-${id}`, html)
         updateWordCount()
-        processContent()
+        processContent(raw)
       })
       .catch(() => {})
   }, [loading, id, authHeaders])
 
-  const fetchNormStatuses = async (uniqueNorms) => {
-    const uncached = uniqueNorms.filter(n => !normCache.current[n])
-    if (uncached.length === 0) return
+  const analyzeDocument = async (text) => {
+    if (!text || text.trim().length === 0) {
+      setArticles([])
+      return
+    }
 
-    setNormLoading(true)
+    setArticlesLoading(true)
     try {
-      const res = await fetch('/api/norm-check', {
+      const res = await fetch('/api/analyze-document', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ norms: uncached })
+        body: JSON.stringify({ document_text: text })
       })
 
-      if (!res.ok) throw new Error('Failed to fetch norm statuses')
+      if (!res.ok) throw new Error('Failed to analyze document')
 
-      const { results } = await res.json()
+      const { articles: foundArticles } = await res.json()
+      setArticles(foundArticles || [])
 
-      // Update cache
-      Object.assign(normCache.current, results)
-
-      // Update DOM classes
-      document.querySelectorAll('[data-norm]').forEach(span => {
-        const normText = span.getAttribute('data-norm')
-        const data = normCache.current[normText]
-        if (data) {
-          span.removeAttribute('data-norm-status')
-          span.classList.remove('norm-pending')
-          span.classList.add(`norm-${data.status}`)
-        }
-      })
+      // Highlight found articles in DOM
+      if (editorRef.current && foundArticles && foundArticles.length > 0) {
+        highlightArticlesInDom(editorRef.current, foundArticles)
+      }
     } catch (error) {
-      console.error('Norm status fetch error:', error)
+      console.error('Document analysis error:', error)
+      setArticles([])
     } finally {
-      setNormLoading(false)
+      setArticlesLoading(false)
     }
   }
 
@@ -404,129 +380,61 @@ export default function DocumentEditorPage() {
 
         {/* Content area */}
         <div className="flex-1 overflow-y-auto p-4">
-          {/* Analysis Tab */}
+          {/* Analysis Tab - List of articles */}
           {activePanel === 'analysis' && (
             <div className="space-y-4">
-              {selectedNorm ? (
-                <>
-                  <button
-                    onClick={() => setSelectedNorm(null)}
-                    className="flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 mb-2"
-                  >
-                    <ChevronRight size={14} className="rotate-180" />
-                    Все нормы
-                  </button>
+              <p className="text-xs font-semibold text-gray-700 uppercase">Статьи документа</p>
 
-                  {/* Detailed norm card */}
-                  {(() => {
-                    const data = selectedNorm.data
-                    return (
-                      <div className="space-y-4">
-                        {/* Status badge */}
-                        <div>
-                          {(() => {
-                            const s = data.status
-                            const m = { valid: 'ДЕЙСТВУЕТ', outdated: 'УСТАРЕЛА', invalid: 'НЕ СУЩЕСТВУЕТ' }
-                            const c = {
-                              valid: 'bg-green-100 text-green-800',
-                              outdated: 'bg-gray-100 text-gray-800',
-                              invalid: 'bg-red-100 text-red-800'
-                            }
-                            return (
-                              <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${c[s] || c.valid}`}>
-                                {m[s] || s}
-                              </span>
-                            )
-                          })()}
-                        </div>
-
-                        {/* Norm title */}
-                        <div>
-                          <p className="text-sm font-semibold text-gray-900">{data.title || selectedNorm.text}</p>
-                          {data.title && (
-                            <p className="text-xs text-gray-400 mt-1">{selectedNorm.text}</p>
-                          )}
-                        </div>
-
-                        {/* Analysis description */}
-                        {data.analysis && (
-                          <div className="p-3 bg-blue-50 rounded-xl border border-blue-100">
-                            <p className="text-xs text-blue-900 leading-relaxed">{data.analysis}</p>
-                          </div>
-                        )}
-
-                        {/* Related laws */}
-                        {data.related_laws && data.related_laws.length > 0 && (
-                          <div className="border-t border-gray-100 pt-3">
-                            <p className="text-xs font-medium text-gray-700 mb-2">Связанные законы</p>
-                            <div className="space-y-2">
-                              {data.related_laws.map((law, idx) => (
-                                <div key={idx} className="p-2 rounded-lg bg-gray-50 border border-gray-100">
-                                  <p className="text-xs font-medium text-gray-900">{law.title}</p>
-                                  <p className="text-xs text-gray-500 mt-0.5">{law.number}</p>
-                                  {law.relevance && (
-                                    <p className="text-xs text-gray-600 mt-1">{law.relevance}</p>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
+              {articlesLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 size={16} className="animate-spin text-gray-300" />
+                </div>
+              ) : articles.length === 0 ? (
+                <p className="text-xs text-gray-400 text-center py-8">Нормативные ссылки не найдены</p>
+              ) : (
+                <div className="space-y-3">
+                  {articles.map((article, idx) => (
+                    <div
+                      key={idx}
+                      onClick={() => {
+                        setSelectedArticle(article)
+                        setActivePanel('chronology')
+                      }}
+                      className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer hover:shadow-sm transition-all ${
+                        article.status === 'valid'
+                          ? 'bg-green-50 border-green-200'
+                          : article.status === 'outdated'
+                          ? 'bg-gray-50 border-gray-200'
+                          : 'bg-red-50 border-red-200'
+                      }`}
+                    >
+                      <div
+                        className="w-3 h-3 rounded-full mt-1 flex-shrink-0"
+                        style={{
+                          backgroundColor:
+                            article.status === 'valid'
+                              ? '#10B981'
+                              : article.status === 'outdated'
+                              ? '#9CA3AF'
+                              : '#EF4444'
+                        }}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900">{article.norm_text}</p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {article.status === 'valid'
+                            ? 'Действует'
+                            : article.status === 'outdated'
+                            ? 'Устарела'
+                            : 'Не существует'}
+                        </p>
+                        {article.applicability && (
+                          <p className="text-xs text-gray-600 mt-1.5 leading-relaxed">{article.applicability}</p>
                         )}
                       </div>
-                    )
-                  })()}
-                </>
-              ) : (
-                <>
-                  {errorsSummary && (
-                    <p className="text-sm text-gray-600 mb-4">{errorsSummary}</p>
-                  )}
-                  {normLoading ? (
-                    <div className="flex items-center justify-center py-8">
-                      <Loader2 size={16} className="animate-spin text-gray-300" />
                     </div>
-                  ) : Object.keys(normCache.current).length === 0 ? (
-                    <p className="text-xs text-gray-400 text-center py-8">Нормы не найдены</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {Object.entries(normCache.current).map(([normText, data], idx) => (
-                        <div
-                          key={idx}
-                          onClick={() => setSelectedNorm({ text: normText, data })}
-                          className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer hover:shadow-sm transition-all ${
-                            data.status === 'valid'
-                              ? 'bg-green-50 border-green-200'
-                              : data.status === 'outdated'
-                              ? 'bg-gray-50 border-gray-200'
-                              : 'bg-red-50 border-red-200'
-                          }`}
-                        >
-                          <div
-                            className="w-3 h-3 rounded-full mt-1 flex-shrink-0"
-                            style={{
-                              backgroundColor:
-                                data.status === 'valid'
-                                  ? '#10B981'
-                                  : data.status === 'outdated'
-                                  ? '#9CA3AF'
-                                  : '#EF4444'
-                            }}
-                          />
-                          <div className="flex-1">
-                            <p className="text-sm font-medium text-gray-900">{data.title || normText}</p>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                              {data.status === 'valid'
-                                ? 'Действительно/Соответствует'
-                                : data.status === 'outdated'
-                                ? 'Устаревший'
-                                : 'Недействительно'}
-                            </p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
+                  ))}
+                </div>
               )}
             </div>
           )}
@@ -534,25 +442,20 @@ export default function DocumentEditorPage() {
           {/* Chronology Tab */}
           {activePanel === 'chronology' && (
             <div className="space-y-4">
-              {!selectedNorm ? (
+              {!selectedArticle ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mb-3">
                     <GitBranch size={18} className="text-gray-400" />
                   </div>
-                  <p className="text-xs text-gray-500 font-medium">Кликните на выделенную норму</p>
-                  <p className="text-xs text-gray-400 mt-1">чтобы увидеть её историю</p>
+                  <p className="text-xs text-gray-500 font-medium">Кликните на норму</p>
+                  <p className="text-xs text-gray-400 mt-1">в списке или в документе</p>
                 </div>
-              ) : normLoading ? (
-                <div className="space-y-3 animate-pulse">
-                  <div className="h-6 bg-gray-100 rounded w-24" />
-                  <div className="h-4 bg-gray-100 rounded w-48" />
-                </div>
-              ) : selectedNorm.data ? (
+              ) : selectedArticle ? (
                 <>
                   {/* Status badge */}
                   <div className="flex items-center gap-2">
                     {(() => {
-                      const s = selectedNorm.data.status
+                      const s = selectedArticle.status
                       const m = { valid: 'ДЕЙСТВУЕТ', outdated: 'УСТАРЕЛА', invalid: 'НЕ СУЩЕСТВУЕТ' }
                       const c = {
                         valid: 'bg-green-100 text-green-800',
@@ -567,125 +470,123 @@ export default function DocumentEditorPage() {
                     })()}
                   </div>
 
-                  {/* Norm title */}
+                  {/* Article title and reference */}
                   <div>
-                    <p className="text-sm font-semibold text-gray-900">{selectedNorm.data.title || selectedNorm.text}</p>
-                    {selectedNorm.data.title && (
-                      <p className="text-xs text-gray-400 mt-0.5">{selectedNorm.text}</p>
+                    <p className="text-sm font-semibold text-gray-900">{selectedArticle.title || selectedArticle.norm_text}</p>
+                    {selectedArticle.title && (
+                      <p className="text-xs text-gray-400 mt-0.5">{selectedArticle.norm_text}</p>
                     )}
                   </div>
 
-                  {/* Timeline with vertical line */}
+                  {/* Applicability */}
+                  {selectedArticle.applicability && (
+                    <div className="p-3 bg-blue-50 rounded-xl border border-blue-100">
+                      <p className="text-xs font-medium text-blue-900 mb-1">Применимость:</p>
+                      <p className="text-xs text-blue-800 leading-relaxed">{selectedArticle.applicability}</p>
+                    </div>
+                  )}
+
+                  {/* Usage context */}
+                  {selectedArticle.usage_context && (
+                    <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
+                      <p className="text-xs font-medium text-amber-900 mb-1">Контекст использования:</p>
+                      <p className="text-xs text-amber-800 leading-relaxed">{selectedArticle.usage_context}</p>
+                    </div>
+                  )}
+
+                  {/* Timeline */}
                   {(() => {
                     const entries = []
-                    if (selectedNorm.data.introduced) {
+                    if (selectedArticle.introduced) {
                       entries.push({
-                        date: selectedNorm.data.introduced,
+                        date: selectedArticle.introduced,
                         label: 'Введена',
                         type: 'introduced'
                       })
                     }
-                    if (selectedNorm.data.amendments && Array.isArray(selectedNorm.data.amendments)) {
-                      selectedNorm.data.amendments.forEach(a => {
+                    if (selectedArticle.amendments && Array.isArray(selectedArticle.amendments)) {
+                      selectedArticle.amendments.forEach(a => {
                         entries.push({ date: a.date, label: a.description, type: 'amendment' })
                       })
                     }
                     entries.sort((a, b) => a.date.localeCompare(b.date))
 
-                    if (entries.length === 0) return null
+                    if (entries.length === 0 && !selectedArticle.replaced_by && !selectedArticle.deleted_at) return null
 
-                    const isValid = selectedNorm.data.status === 'valid'
-                    const isOutdated = selectedNorm.data.status === 'outdated'
-                    const isInvalid = selectedNorm.data.status === 'invalid'
+                    const isValid = selectedArticle.status === 'valid'
+                    const isOutdated = selectedArticle.status === 'outdated'
+                    const isInvalid = selectedArticle.status === 'invalid'
 
                     return (
                       <div className="border-t border-gray-100 pt-4">
-                        <p className="text-xs font-medium text-gray-500 mb-3 uppercase">Хронология</p>
+                        <p className="text-xs font-medium text-gray-500 mb-3 uppercase">История изменений</p>
 
-                        {isOutdated && selectedNorm.data.replaced_by && (
+                        {selectedArticle.deleted_at && (
+                          <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200">
+                            <p className="text-xs font-medium text-red-900">Удалена {selectedArticle.deleted_at}</p>
+                          </div>
+                        )}
+
+                        {isOutdated && selectedArticle.replaced_by && (
                           <div className="mb-4 p-3 rounded-xl bg-gray-50 border border-gray-200">
                             <p className="text-xs font-medium text-gray-900">
-                              Устарел {selectedNorm.data.status_since || ''}, заменён:
+                              Заменена {selectedArticle.status_since || ''}:
                             </p>
-                            <p className="text-xs text-gray-600 mt-1">{selectedNorm.data.replaced_by}</p>
+                            <p className="text-xs text-gray-600 mt-1">{selectedArticle.replaced_by}</p>
                           </div>
                         )}
 
-                        {isInvalid && (
-                          <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200">
-                            <p className="text-xs font-medium text-red-900">Не существует в законодательстве РК</p>
-                          </div>
-                        )}
+                        {entries.length > 0 && (
+                          <div className="relative pl-8">
+                            <div
+                              className="absolute left-3 top-0 bottom-0 w-0.5"
+                              style={{
+                                background:
+                                  isValid ? '#ADFF5E' :
+                                  isOutdated ? 'transparent' :
+                                  'transparent',
+                                borderLeft:
+                                  isOutdated ? '2px dashed #9CA3AF' :
+                                  isInvalid ? '2px dashed #EF4444' :
+                                  'none'
+                              }}
+                            />
 
-                        <div className="relative pl-8">
-                          {/* Vertical line */}
-                          <div
-                            className="absolute left-3 top-0 bottom-0 w-0.5"
-                            style={{
-                              background:
-                                isValid ? '#ADFF5E' :
-                                isOutdated ? 'transparent' :
-                                'transparent',
-                              borderLeft:
-                                isOutdated ? '2px dashed #9CA3AF' :
-                                isInvalid ? '2px dashed #EF4444' :
-                                'none'
-                            }}
-                          />
-
-                          {/* Timeline entries */}
-                          <div className="space-y-3">
-                            {entries.map((entry, idx) => (
-                              <div key={idx} className="relative">
-                                <div className="flex gap-3">
-                                  <div className="text-xs text-gray-400 w-16 flex-shrink-0 pt-0.5">
-                                    {new Date(entry.date).toLocaleDateString('ru-RU', {
-                                      day: 'numeric',
-                                      month: '2-digit',
-                                      year: '2-digit'
-                                    })}
-                                  </div>
-                                  <div className="flex-1 p-3 rounded-xl border border-gray-200 bg-white">
-                                    <p className="text-xs font-medium text-gray-900">{entry.label}</p>
+                            <div className="space-y-3">
+                              {entries.map((entry, idx) => (
+                                <div key={idx} className="relative">
+                                  <div className="flex gap-3">
+                                    <div className="text-xs text-gray-400 w-16 flex-shrink-0 pt-0.5">
+                                      {new Date(entry.date).toLocaleDateString('ru-RU', {
+                                        day: 'numeric',
+                                        month: '2-digit',
+                                        year: '2-digit'
+                                      })}
+                                    </div>
+                                    <div className="flex-1 p-3 rounded-xl border border-gray-200 bg-white">
+                                      <p className="text-xs font-medium text-gray-900">{entry.label}</p>
+                                    </div>
                                   </div>
                                 </div>
-                              </div>
-                            ))}
+                              ))}
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </div>
                     )
                   })()}
 
-                  {/* Explanation */}
-                  {selectedNorm.data.current_status_explanation && (
+                  {/* Current status explanation */}
+                  {selectedArticle.current_status_explanation && (
                     <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
                       <p className="text-xs text-gray-700 leading-relaxed">
-                        {selectedNorm.data.current_status_explanation}
+                        {selectedArticle.current_status_explanation}
                       </p>
-                    </div>
-                  )}
-
-                  {/* Related Laws */}
-                  {selectedNorm.data.related_laws && selectedNorm.data.related_laws.length > 0 && (
-                    <div className="border-t border-gray-100 pt-4">
-                      <p className="text-xs font-medium text-gray-500 mb-3 uppercase">Связанные законы</p>
-                      <div className="space-y-2">
-                        {selectedNorm.data.related_laws.map((law, idx) => (
-                          <div key={idx} className="p-3 rounded-xl bg-gray-50 border border-gray-200">
-                            <p className="text-xs font-medium text-gray-900">{law.title}</p>
-                            <p className="text-xs text-gray-500 mt-0.5">{law.number}</p>
-                            {law.relevance && (
-                              <p className="text-xs text-gray-600 mt-1">{law.relevance}</p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
                     </div>
                   )}
                 </>
               ) : (
-                <p className="text-xs text-gray-400 text-center py-4">Норма не найдена</p>
+                <p className="text-xs text-gray-400 text-center py-4">Статья не найдена</p>
               )}
             </div>
           )}
@@ -693,29 +594,23 @@ export default function DocumentEditorPage() {
           {/* Formulation Tab */}
           {activePanel === 'formulation' && (
             <div className="space-y-4">
-              {/* Norm-specific formulation issues */}
-              {selectedNorm?.data?.formulation_issues && selectedNorm.data.formulation_issues.length > 0 && (
+              {selectedArticle && (
                 <div>
-                  <p className="text-xs font-semibold text-gray-700 mb-3">Анализ нормы: {selectedNorm.data.title || selectedNorm.text}</p>
-                  <div className="space-y-3 mb-4 pb-4 border-b border-gray-200">
-                    {selectedNorm.data.formulation_issues.map((issue, idx) => (
-                      <div key={idx} className="border border-gray-200 rounded-xl overflow-hidden">
-                        <div className="flex items-start gap-3 p-4">
-                          <div className="flex-shrink-0 pt-0.5">
-                            <span className="inline-block px-2 py-1 text-xs font-semibold rounded bg-amber-100 text-amber-800">
-                              {issue.type}
-                            </span>
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs text-gray-600">{issue.description}</p>
-                            {issue.suggestion && (
-                              <p className="text-xs text-gray-500 mt-2 italic">💡 {issue.suggestion}</p>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <p className="text-xs font-semibold text-gray-700 mb-3">Статья: {selectedArticle.title || selectedArticle.norm_text}</p>
+
+                  {selectedArticle.applicability && (
+                    <div className="p-2 mb-3 rounded-lg bg-blue-50 border border-blue-100">
+                      <p className="text-xs text-blue-800">{selectedArticle.applicability}</p>
+                    </div>
+                  )}
+
+                  {selectedArticle.usage_context && (
+                    <div className="p-2 mb-4 rounded-lg bg-amber-50 border border-amber-100">
+                      <p className="text-xs text-amber-800">{selectedArticle.usage_context}</p>
+                    </div>
+                  )}
+
+                  <div className="border-b border-gray-100 pb-4 mb-4" />
                 </div>
               )}
 
@@ -775,9 +670,9 @@ export default function DocumentEditorPage() {
                     ))}
                   </div>
                 </>
-              ) : !selectedNorm?.data?.formulation_issues || selectedNorm.data.formulation_issues.length === 0 ? (
+              ) : (
                 <p className="text-xs text-gray-400 text-center py-8">Ошибки не найдены</p>
-              ) : null}
+              )}
             </div>
           )}
         </div>
@@ -897,9 +792,11 @@ export default function DocumentEditorPage() {
                   const span = e.target.closest('[data-norm]')
                   if (span) {
                     const normText = span.getAttribute('data-norm')
-                    const data = normCache.current[normText]
-                    setSelectedNorm({ text: normText, data })
-                    setActivePanel('chronology')
+                    const foundArticle = articles.find(a => a.norm_text === normText)
+                    if (foundArticle) {
+                      setSelectedArticle(foundArticle)
+                      setActivePanel('chronology')
+                    }
                   }
                 }}
                 onSelect={updateActiveFormats}
