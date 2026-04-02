@@ -95,6 +95,44 @@ async def upload_document(
     return doc
 
 
+@router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+async def create_document(
+    title: str,
+    extracted_text: str,
+    folder_id: int | None = None,
+    filename: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a document with text content directly"""
+    doc = Document(
+        user_id=current_user.id,
+        folder_id=folder_id,
+        title=title,
+        filename=filename or f"{title}.txt",
+        file_path=None,
+        content_type="text/plain",
+        size=len(extracted_text),
+        status="completed",
+        extracted_text=extracted_text,
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action="document.create",
+        resource_type="document",
+        resource_id=doc.id,
+        detail=f"Created {title}",
+    )
+    db.add(log)
+    await db.commit()
+
+    return doc
+
+
 @router.get("/search", response_model=list[DocumentSearchResult])
 async def search_documents(
     q: str,
