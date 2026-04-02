@@ -4,6 +4,9 @@ from pydantic import BaseModel, EmailStr
 
 class DocumentCreate(BaseModel):
     title: str
+    extracted_text: str | None = None
+    folder_id: int | None = None
+    filename: str | None = None
 
 
 class DocumentUpdate(BaseModel):
@@ -135,6 +138,20 @@ class DocumentInsights(BaseModel):
     sections_count: int
     definitions_count: int
     key_terms: list[str]
+
+
+class DocumentError(BaseModel):
+    id: str
+    type: str
+    title: str
+    original_text: str
+    suggestion: str
+    reason: str
+
+
+class DocumentErrors(BaseModel):
+    summary: str
+    errors: list[DocumentError]
 
 
 class FolderCreate(BaseModel):

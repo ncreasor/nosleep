@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # inLaw — AI-платформа для юридических документов
 
 > **Decentrathon 2025** — решение команды nosleep
@@ -224,9 +223,8 @@ python scraper.py --lang kaz --workers 4
 ---
 
 **nosleep** @ Decentrathon 2025
+
 =======
-# nosleep
-Исправление документов в один клик
-# ui/ux
-https://www.figma.com/site/wu4iuBPGgyBIFLfW1r0xJY/Decentrathon-2?node-id=10-11080&t=EJPba1QIbifgGlGl-0
->>>>>>> 611e17c083adbb1aac55d5ff0a25b1b77761121e
+
+made with ❤️ by no sleep club
+
