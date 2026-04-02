@@ -33,10 +33,11 @@ class Template(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
     folder_id = Column(Integer, ForeignKey("template_folders.id"), nullable=True, index=True)
+    source_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True, index=True)
     name = Column(String, index=True)
     description = Column(Text, nullable=True)
-    content = Column(Text)  # Template content
-    tags = Column(String, nullable=True)  # Comma-separated tags
+    content = Column(Text)  # Template content (JSON)
+    tags = Column(String, nullable=True)  # Comma-separated tags / document type
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

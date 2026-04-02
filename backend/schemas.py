@@ -205,6 +205,7 @@ class TemplateFolderResponse(BaseModel):
 
 class TemplateCreate(BaseModel):
     folder_id: int | None = None
+    source_document_id: int | None = None
     name: str
     description: str | None = None
     content: str
@@ -223,6 +224,7 @@ class TemplateResponse(BaseModel):
     id: int
     user_id: int
     folder_id: int | None
+    source_document_id: int | None = None
     name: str
     description: str | None = None
     content: str
@@ -232,3 +234,9 @@ class TemplateResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class GenerateTemplateRequest(BaseModel):
+    """Request to generate a template from a document"""
+    folder_id: int | None = None
+    name: str | None = None

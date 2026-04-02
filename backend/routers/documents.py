@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openai import OpenAI
 
 from database import get_db
-from models import Document, User, AuditLog
-from schemas import DocumentResponse, DocumentUpdate, DocumentSearchResult, DocumentAnalysis, DocumentInsights, DocumentCreate, DocumentErrors
+from models import Document, User, AuditLog, Template
+from schemas import DocumentResponse, DocumentUpdate, DocumentSearchResult, DocumentAnalysis, DocumentInsights, DocumentCreate, DocumentErrors, GenerateTemplateRequest, TemplateResponse
 from auth import get_current_user
 from config import settings
 from processing import (
@@ -509,3 +509,172 @@ Document text:
         import logging
         logging.error(f"Error analyzing document for errors: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{document_id}/generate-template", response_model=TemplateResponse)
+async def generate_template_from_document(
+    document_id: int,
+    request: GenerateTemplateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Generate a template from a document by analyzing its structure and variables.
+    The template can be edited and used to generate similar documents.
+    """
+    try:
+        # Fetch document
+        doc = await db.get(Document, document_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        if not doc.extracted_text:
+            raise HTTPException(status_code=400, detail="Document text not extracted yet")
+
+        # Generate template structure from document
+        template_content = await _generate_template_content(doc.extracted_text)
+
+        # Create template in database
+        template = Template(
+            user_id=current_user.id,
+            folder_id=request.folder_id,
+            source_document_id=document_id,
+            name=request.name or f"Шаблон: {doc.title}",
+            description=f"Сгенерировано из документа: {doc.title}",
+            content=json.dumps(template_content, ensure_ascii=False, indent=2),
+            tags=template_content.get("document_type", ""),
+        )
+
+        db.add(template)
+        await db.commit()
+        await db.refresh(template)
+
+        # Log action
+        audit_log = AuditLog(
+            user_id=current_user.id,
+            action="create_template_from_document",
+            resource_type="template",
+            resource_id=template.id,
+            detail=f"Created from document {document_id}",
+        )
+        db.add(audit_log)
+        await db.commit()
+
+        return template
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logging.error(f"Error generating template: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _generate_template_content(text: str) -> dict:
+    """
+    Use GPT to analyze document and extract template structure with variables.
+    Returns JSON with sections and variables.
+    """
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    # Truncate text to avoid excessive tokens
+    truncated_text = text[:6000]
+
+    try:
+        response = client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are a legal document template generator.
+Analyze the provided document and create a reusable template structure.
+
+RULES:
+1. Identify recurring variable parts: names, dates, numbers, addresses, amounts, percentages
+2. Replace variable parts with placeholders like {{variable_id}} using snake_case for ID
+3. Split document into logical sections: header, parties, subject, terms, conditions, signatures, etc.
+4. Keep all legal text unchanged
+5. Return ONLY valid JSON with NO markdown or explanation
+
+Variable types: "text", "date", "number", "multiline", "select"
+For select type, include "options": ["value1", "value2", ...]
+""",
+                },
+                {
+                    "role": "user",
+                    "content": f"""Analyze this document and create a template structure.
+Extract all variable parts and mark them as placeholders.
+Return JSON with sections containing content with {{{{placeholders}}}} and variables array.
+
+DOCUMENT:
+---
+{truncated_text}
+---
+
+Return JSON format:
+{{
+  "document_type": "Тип документа на русском",
+  "sections": [
+    {{
+      "id": "section-id",
+      "title": "Section Title",
+      "order": 1,
+      "content": "Section text with {{{{placeholder_id}}}} and more text",
+      "variables": [
+        {{
+          "id": "placeholder_id",
+          "label": "Human-readable label in Russian",
+          "type": "text",
+          "default": "",
+          "placeholder": "Example value"
+        }}
+      ]
+    }}
+  ]
+}}
+
+CRITICAL: Return ONLY JSON, no other text.""",
+                },
+            ],
+            temperature=0.3,
+            max_tokens=3000,
+        )
+
+        content = response.choices[0].message.content.strip()
+
+        # Try to parse JSON
+        template_json = json.loads(content)
+
+        # Validate structure
+        if not isinstance(template_json, dict):
+            template_json = {"sections": []}
+
+        if "sections" not in template_json:
+            template_json["sections"] = []
+
+        if "document_type" not in template_json:
+            template_json["document_type"] = "Документ"
+
+        return template_json
+
+    except json.JSONDecodeError as e:
+        import logging
+        logging.error(f"Failed to parse GPT template response: {e}")
+        # Return minimal valid template
+        return {
+            "document_type": "Документ",
+            "sections": [
+                {
+                    "id": "content",
+                    "title": "Содержание",
+                    "order": 1,
+                    "content": text[:2000],
+                    "variables": [],
+                }
+            ],
+        }
+
+    except Exception as e:
+        import logging
+        logging.error(f"Error calling GPT for template generation: {e}")
+        raise
