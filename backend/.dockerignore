@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.env
+.env.local
+.git
+.gitignore
+.pytest_cache
+.vscode
+.idea
+*.db
+uploads/
+migrations/__pycache__
