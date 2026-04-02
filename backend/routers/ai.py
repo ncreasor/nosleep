@@ -572,3 +572,24 @@ Respond in Russian. Be concise and professional."""
 
 # Import AsyncSessionLocal for WebSocket
 from database import AsyncSessionLocal
+
+
+class ArticlesValidationRequest(BaseModel):
+    articles: list[dict]
+
+
+@router.post("/validate-articles")
+async def validate_articles_handler(request: ArticlesValidationRequest):
+    """
+    Validate legal articles against Kazakh laws database
+    Returns articles with status and information from real database
+    """
+    try:
+        # Import here to avoid circular imports
+        from laws_validator import validate_articles as validate_articles_fn
+
+        validated_articles = validate_articles_fn(request.articles)
+        return {"articles": validated_articles}
+    except Exception as e:
+        logger.error(f"Error validating articles: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

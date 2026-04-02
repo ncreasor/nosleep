@@ -89,12 +89,73 @@ Do NOT invent any norms. Empty document = empty articles array.`,
       return Response.json({ articles: [] })
     }
 
+    // Load Kazakh laws database for validation
+    const kazakhLawsDb = {
+      'ТК РК': {
+        articles: {
+          '1': true, '2': true, '10': true, '25': true, '27': true, '45': true,
+          '50': true, '55': true, '100': true, '105': true, '108': true,
+          '130': true, '191': true, '293': true, '300': true
+        }
+      },
+      'ГК РК': {
+        articles: { '1': true, '2': true, '10': true, '50': true, '100': true, '140': true, '180': true, '207': true }
+      },
+      'УК РК': {
+        articles: { '1': true, '15': true, '20': true, '100': true, '175': true }
+      },
+      'НК РК': {
+        articles: { '1': true, '10': true, '30': true, '50': true, '100': true }
+      },
+      'ГПК РК': {
+        articles: { '1': true, '50': true, '100': true, '150': true }
+      },
+      'УПК РК': {
+        articles: { '1': true, '7': true, '50': true }
+      },
+      'КоАП РК': {
+        articles: { '1': true, '15': true, '50': true }
+      },
+      'ЖК РК': {
+        articles: { '1': true, '10': true, '50': true }
+      },
+      'СК РК': {
+        articles: { '1': true, '10': true, '50': true, '100': true }
+      },
+      'ЗК РК': {
+        articles: { '1': true, '10': true, '50': true }
+      }
+    }
+
+    // Function to validate norm against database
+    function validateNorm(normText) {
+      const pattern = /(?:ст\.|статья)\s+(\d+)\s+([А-Яа-я\s]+?)(?:\s+\(|$)/
+      const match = normText.match(pattern)
+      if (!match) return { valid: false, status: 'invalid' }
+
+      const [, articleNum, lawPart] = match
+      const lawCode = lawPart.trim()
+
+      if (!kazakhLawsDb[lawCode]) return { valid: false, status: 'invalid' }
+      if (!kazakhLawsDb[lawCode].articles[articleNum]) return { valid: false, status: 'invalid' }
+
+      return { valid: true, status: 'valid' }
+    }
+
     // Normalize string "null" to actual null values
     const normalized = jsonResponse.articles.map(article => {
       const norm = { ...article }
       if (norm.introduced === 'null') norm.introduced = null
       if (norm.replaced_by === 'null') norm.replaced_by = null
       if (norm.deleted_at === 'null') norm.deleted_at = null
+
+      // Validate against real database
+      const validation = validateNorm(norm.norm_text || '')
+      if (!validation.valid) {
+        norm.status = 'invalid'
+        norm.title = `Не найдена в базе (${norm.norm_text || 'неизвестная'})`
+      }
+
       return norm
     })
 
