@@ -52,7 +52,14 @@ function DocCard({ doc, openMenu, setOpenMenu, editingId, setEditingId, editTitl
             </button>
           </div>
         ) : (
-          <p className="text-sm font-semibold text-ink leading-snug line-clamp-3">{doc.title}</p>
+          <div className="flex items-start gap-2 min-w-0">
+            <p className="text-sm font-semibold text-ink leading-snug line-clamp-3 flex-1">{doc.title}</p>
+            {doc.protected && (
+              <span className="shrink-0 rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                Демо
+              </span>
+            )}
+          </div>
         )}
 
         <div className="relative flex-shrink-0">
@@ -70,12 +77,14 @@ function DocCard({ doc, openMenu, setOpenMenu, editingId, setEditingId, editTitl
               >
                 <Pencil size={13} /> Переименовать
               </button>
-              <button
-                onClick={e => { e.stopPropagation(); onDelete(doc.id) }}
-                className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 w-full text-left"
-              >
-                <Trash2 size={13} /> Удалить
-              </button>
+              {!doc.protected && (
+                <button
+                  onClick={e => { e.stopPropagation(); onDelete(doc.id) }}
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 w-full text-left"
+                >
+                  <Trash2 size={13} /> Удалить
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -296,7 +305,15 @@ export default function DocumentsPage() {
 
   const handleDelete = async (docId) => {
     try {
-      await fetch(`${BACKEND}/documents/${docId}`, { method: 'DELETE', headers: authHeaders })
+      const res = await fetch(`${BACKEND}/documents/${docId}`, { method: 'DELETE', headers: authHeaders })
+      if (res.status === 403) {
+        alert('Этот демонстрационный договор нельзя удалить')
+        return
+      }
+      if (!res.ok) {
+        console.error('Delete failed', await res.text())
+        return
+      }
       fetchDocuments()
     } catch (e) {
       console.error(e)

@@ -7,7 +7,8 @@ import { useAuth } from '@/components/useAuth'
 import {
   ArrowLeft, Check, Loader2, Bold, Italic, Underline,
   List, ListOrdered, Heading1, Heading2, Minus, Redo, Undo,
-  ChevronRight, Trash2, X, BarChart2, GitBranch, Sparkles, AlertCircle,
+  ChevronRight, Trash2, X, BarChart2, GitBranch, Sparkles, AlertCircle, Wrench,
+  ShieldCheck, Link2, AlertTriangle,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
@@ -105,6 +106,16 @@ export default function DocumentEditorPage() {
   const [errorsLoading, setErrorsLoading] = useState(false)
   const [dismissedErrors, setDismissedErrors] = useState(new Set())
   const [askModal, setAskModal] = useState(null)
+  const [normRemedy, setNormRemedy] = useState({
+    loading: false,
+    summary: null,
+    edits: [],
+    skipped: [],
+    warnings: [],
+    error: null,
+    applyError: null,
+    applied: false,
+  })
 
   const editorRef = useRef(null)
   const titleSaveTimeout = useRef(null)
@@ -183,6 +194,89 @@ export default function DocumentEditorPage() {
       .catch(() => {})
   }, [loading, id, authHeaders])
 
+  useEffect(() => {
+    setNormRemedy({
+      loading: false,
+      summary: null,
+      edits: [],
+      skipped: [],
+      warnings: [],
+      error: null,
+      applyError: null,
+      applied: false,
+    })
+  }, [selectedArticle])
+
+  const solveNormIssue = useCallback(async () => {
+    if (!selectedArticle) return
+    setNormRemedy((prev) => ({
+      ...prev,
+      loading: true,
+      summary: null,
+      edits: [],
+      skipped: [],
+      warnings: [],
+      error: null,
+      applyError: null,
+      applied: false,
+    }))
+    try {
+      const context = editorRef.current?.innerText?.substring(0, 12000) || ''
+      const res = await fetch(`${BACKEND}/ai/remediate-norm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({
+          status: selectedArticle.status,
+          norm_text: selectedArticle.norm_text,
+          title: selectedArticle.title,
+          law_url: selectedArticle.law_url,
+          law_chunk_preview: selectedArticle.law_chunk_preview,
+          usage_context: selectedArticle.usage_context,
+          applicability: selectedArticle.applicability,
+          current_status_explanation: selectedArticle.current_status_explanation,
+          document_context: context,
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setNormRemedy({
+          loading: false,
+          summary: data.summary || '',
+          edits: Array.isArray(data.edits) ? data.edits : [],
+          skipped: Array.isArray(data.skipped) ? data.skipped : [],
+          warnings: Array.isArray(data.warnings) ? data.warnings : [],
+          error: null,
+          applyError: null,
+          applied: false,
+        })
+      } else {
+        const errText = await res.text().catch(() => '')
+        setNormRemedy({
+          loading: false,
+          summary: null,
+          edits: [],
+          skipped: [],
+          warnings: [],
+          error: errText || 'Не удалось подготовить правки',
+          applyError: null,
+          applied: false,
+        })
+      }
+    } catch (e) {
+      console.error(e)
+      setNormRemedy({
+        loading: false,
+        summary: null,
+        edits: [],
+        skipped: [],
+        warnings: [],
+        error: 'Ошибка запроса',
+        applyError: null,
+        applied: false,
+      })
+    }
+  }, [selectedArticle, authHeaders])
+
   const analyzeDocument = async (text) => {
     if (!text || text.trim().length === 0) {
       setArticles([])
@@ -238,6 +332,54 @@ export default function DocumentEditorPage() {
     const text = editorRef.current.innerText || ''
     setWordCount(text.trim().split(/\s+/).filter(Boolean).length)
   }
+
+  const applyNormEdits = useCallback(() => {
+    const edits = normRemedy.edits
+    if (!editorRef.current || !edits?.length) return
+    const sorted = [...edits].sort((a, b) => b.find.length - a.find.length)
+    const appliedEdits = [...sorted]
+    let text = editorRef.current.innerText
+    for (const e of sorted) {
+      const idx = text.indexOf(e.find)
+      if (idx === -1) {
+        setNormRemedy((prev) => ({
+          ...prev,
+          applyError: `Фрагмент не найден в тексте: «${e.find.slice(0, 96)}${e.find.length > 96 ? '…' : ''}»`,
+        }))
+        return
+      }
+      text = text.slice(0, idx) + e.replace + text.slice(idx + e.find.length)
+    }
+    const html = text.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('')
+    editorRef.current.innerHTML = html
+    localStorage.setItem(`doc-content-${id}`, html)
+    setSaveStatus('unsaved')
+    setNormRemedy((prev) => ({
+      ...prev,
+      edits: [],
+      applied: true,
+      applyError: null,
+    }))
+    updateWordCount()
+    clearTimeout(contentSaveTimeout.current)
+    contentSaveTimeout.current = setTimeout(saveContent, 1500)
+
+    const normLabel = selectedArticle?.norm_text || ''
+    for (const e of appliedEdits) {
+      fetch(`${BACKEND}/documents/${id}/corrections`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({
+          error_id: null,
+          error_type: 'norm_remedy',
+          title: normLabel ? `Правка: ${normLabel.slice(0, 80)}` : 'Правка нормы',
+          original_text: e.find,
+          suggestion: e.replace,
+          reason: null,
+        }),
+      }).catch(() => {})
+    }
+  }, [normRemedy.edits, id, saveContent, authHeaders, selectedArticle])
 
   const updateActiveFormats = () => {
     setActiveFormats({
@@ -320,7 +462,7 @@ export default function DocumentEditorPage() {
       { id: 'formulation', label: 'Формулировка', Icon: Sparkles }
     ]
 
-    const acceptFix = (error) => {
+    const acceptFix = async (error) => {
       if (!editorRef.current || !error.original_text) return
       const html = editorRef.current.innerHTML
       const updated = html.replace(
@@ -332,6 +474,22 @@ export default function DocumentEditorPage() {
         localStorage.setItem(`doc-content-${id}`, updated)
         setErrors(prev => prev.filter(e => e.id !== error.id))
         setSaveStatus('unsaved')
+        try {
+          await fetch(`${BACKEND}/documents/${id}/corrections`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders },
+            body: JSON.stringify({
+              error_id: error.id,
+              error_type: error.type,
+              title: error.title,
+              original_text: error.original_text,
+              suggestion: error.suggestion,
+              reason: error.reason,
+            }),
+          })
+        } catch (e) {
+          console.error('Failed to save correction:', e)
+        }
       }
     }
 
@@ -395,57 +553,145 @@ export default function DocumentEditorPage() {
           {/* Analysis Tab - List of articles */}
           {activePanel === 'analysis' && (
             <div className="space-y-4">
-              <p className="text-xs font-semibold text-gray-700 uppercase">Статьи документа</p>
+              <div>
+                <h3 className="text-sm font-semibold tracking-tight text-gray-900">Релевантные нормы</h3>
+                <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
+                  Семантический поиск по <span className="font-medium text-gray-600">zan_legal_docs</span>
+                  · проверка номеров статей и справочника
+                </p>
+              </div>
 
               {articlesLoading ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 size={16} className="animate-spin text-gray-300" />
+                <div className="flex items-center justify-center py-10">
+                  <Loader2 size={20} className="animate-spin text-gray-300" />
                 </div>
               ) : articles.length === 0 ? (
-                <p className="text-xs text-gray-400 text-center py-8">Нормативные ссылки не найдены</p>
+                <p className="rounded-xl border border-dashed border-gray-200 bg-gray-50/80 px-4 py-8 text-center text-xs text-gray-500">
+                  Совпадений не найдено — попробуйте расширить текст документа.
+                </p>
               ) : (
-                <div className="space-y-3">
-                  {articles.map((article, idx) => (
-                    <div
-                      key={idx}
-                      onClick={() => {
-                        setSelectedArticle(article)
-                        setActivePanel('chronology')
-                      }}
-                      className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer hover:shadow-sm transition-all ${
-                        article.status === 'valid'
-                          ? 'bg-green-50 border-green-200'
-                          : article.status === 'outdated'
-                          ? 'bg-gray-50 border-gray-200'
-                          : 'bg-red-50 border-red-200'
-                      }`}
-                    >
-                      <div
-                        className="w-3 h-3 rounded-full mt-1 flex-shrink-0"
-                        style={{
-                          backgroundColor:
-                            article.status === 'valid'
-                              ? '#10B981'
-                              : article.status === 'outdated'
-                              ? '#9CA3AF'
-                              : '#EF4444'
+                <div className="space-y-2.5">
+                  {articles.map((article, idx) => {
+                    const conf = typeof article.confidence === 'number' ? article.confidence : null
+                    const level = article.confidence_level
+                    const av = article.article_verification
+                    const confColor =
+                      level === 'high'
+                        ? 'text-emerald-600'
+                        : level === 'medium'
+                        ? 'text-amber-600'
+                        : 'text-slate-500'
+                    const ringColor =
+                      level === 'high'
+                        ? 'stroke-emerald-500'
+                        : level === 'medium'
+                        ? 'stroke-amber-500'
+                        : 'stroke-slate-400'
+                    const align = av?.alignment
+                    return (
+                      <button
+                        type="button"
+                        key={article.qdrant_point_id || article.norm_text || idx}
+                        onClick={() => {
+                          setSelectedArticle(article)
+                          setActivePanel('chronology')
                         }}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900">{article.norm_text}</p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          {article.status === 'valid'
-                            ? 'Действует'
-                            : article.status === 'outdated'
-                            ? 'Устарела'
-                            : 'Не существует'}
-                        </p>
-                        {article.applicability && (
-                          <p className="text-xs text-gray-600 mt-1.5 leading-relaxed">{article.applicability}</p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                        className="group w-full rounded-2xl border border-gray-200/90 bg-white p-3.5 text-left shadow-sm ring-1 ring-black/[0.03] transition hover:border-gray-300 hover:shadow-md"
+                      >
+                        <div className="flex gap-3">
+                          {conf != null && (
+                            <div className="relative flex h-12 w-12 shrink-0 items-center justify-center">
+                              <svg className="h-12 w-12 -rotate-90" viewBox="0 0 36 36">
+                                <circle
+                                  cx="18"
+                                  cy="18"
+                                  r="15.5"
+                                  fill="none"
+                                  className="stroke-gray-100"
+                                  strokeWidth="3"
+                                />
+                                <circle
+                                  cx="18"
+                                  cy="18"
+                                  r="15.5"
+                                  fill="none"
+                                  className={ringColor}
+                                  strokeWidth="3"
+                                  strokeDasharray={`${(conf / 100) * 97.4} 97.4`}
+                                  strokeLinecap="round"
+                                />
+                              </svg>
+                              <span className={`absolute text-[11px] font-bold tabular-nums ${confColor}`}>
+                                {conf}%
+                              </span>
+                            </div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <p className="text-[13px] font-semibold leading-snug text-gray-900 line-clamp-2">
+                                {article.norm_text}
+                              </p>
+                              <span
+                                className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                                  article.status === 'valid'
+                                    ? 'bg-emerald-50 text-emerald-800'
+                                    : article.status === 'outdated'
+                                    ? 'bg-slate-100 text-slate-700'
+                                    : 'bg-red-50 text-red-800'
+                                }`}
+                              >
+                                {article.status === 'valid'
+                                  ? 'Действует'
+                                  : article.status === 'outdated'
+                                  ? 'Не действ.'
+                                  : 'Нет в базе'}
+                              </span>
+                            </div>
+                            <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wider text-gray-400">
+                              Уверенность модели
+                            </p>
+                            {av && (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {align === 'match' && (
+                                  <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-800 ring-1 ring-emerald-200/80">
+                                    <Link2 size={10} />
+                                    Статьи согласованы
+                                  </span>
+                                )}
+                                {align === 'mismatch' && (
+                                  <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-900 ring-1 ring-amber-200/80">
+                                    <AlertTriangle size={10} />
+                                    Номера различаются
+                                  </span>
+                                )}
+                                {align === 'unknown' && (
+                                  <span className="inline-flex items-center gap-1 rounded-md bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-600 ring-1 ring-slate-200/80">
+                                    Статьи: н/д
+                                  </span>
+                                )}
+                                {av.registry?.valid === true && (
+                                  <span className="inline-flex items-center gap-1 rounded-md bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-900 ring-1 ring-sky-200/80">
+                                    <ShieldCheck size={10} />
+                                    Справочник ОК
+                                  </span>
+                                )}
+                                {av.registry?.valid === false && (
+                                  <span className="inline-flex items-center gap-1 rounded-md bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-800 ring-1 ring-red-200/80">
+                                    Справочник: нет статьи
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            {article.law_chunk_preview && (
+                              <p className="mt-2 line-clamp-2 text-[11px] leading-relaxed text-gray-600">
+                                {article.law_chunk_preview}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -480,7 +726,80 @@ export default function DocumentEditorPage() {
                         </span>
                       )
                     })()}
+                    {(selectedArticle.status === 'outdated' || selectedArticle.status === 'invalid') && (
+                      <button
+                        type="button"
+                        onClick={solveNormIssue}
+                        disabled={normRemedy.loading}
+                        className="ml-auto flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-[#ADFF5E] text-gray-900 hover:bg-[#9AE84F] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {normRemedy.loading ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <Wrench size={14} />
+                        )}
+                        Решить проблему
+                      </button>
+                    )}
                   </div>
+
+                  {(selectedArticle.status === 'outdated' || selectedArticle.status === 'invalid') &&
+                    (normRemedy.summary || normRemedy.error || normRemedy.edits?.length > 0 || normRemedy.applied) && (
+                    <div className="space-y-3">
+                      {normRemedy.error && (
+                        <div className="p-3 rounded-xl border border-red-200 bg-red-50 text-xs text-red-900">{normRemedy.error}</div>
+                      )}
+                      {normRemedy.summary && !normRemedy.error && (
+                        <p className="text-xs text-gray-700 leading-relaxed">{normRemedy.summary}</p>
+                      )}
+                      {normRemedy.warnings?.length > 0 && (
+                        <p className="text-[11px] text-amber-700">{normRemedy.warnings.join(' · ')}</p>
+                      )}
+                      {normRemedy.edits?.length > 0 && (
+                        <>
+                          <p className="text-[11px] font-semibold text-gray-600 uppercase">Правки в тексте</p>
+                          <div className="space-y-2 max-h-64 overflow-y-auto">
+                            {normRemedy.edits.map((ed, i) => (
+                              <div key={i} className="p-2.5 rounded-lg border border-gray-200 bg-gray-50 text-[11px]">
+                                {ed.reason && <p className="text-gray-600 mb-1.5">{ed.reason}</p>}
+                                <div className="space-y-1">
+                                  <div>
+                                    <span className="text-gray-400">Было: </span>
+                                    <span className="text-red-800 line-through break-words">{ed.find}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-400">Станет: </span>
+                                    <span className="text-green-800 font-medium break-words">{ed.replace || '(удалить)'}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          {normRemedy.applyError && (
+                            <p className="text-xs text-red-600">{normRemedy.applyError}</p>
+                          )}
+                          <button
+                            type="button"
+                            onClick={applyNormEdits}
+                            className="w-full flex items-center justify-center gap-2 text-xs font-semibold py-2.5 rounded-xl bg-gray-900 text-white hover:bg-gray-800 transition-colors"
+                          >
+                            <Wrench size={14} />
+                            Применить в документе
+                          </button>
+                        </>
+                      )}
+                      {normRemedy.applied && (
+                        <p className="text-xs font-medium text-green-700">Изменения внесены в текст редактора.</p>
+                      )}
+                      {!normRemedy.loading &&
+                        !normRemedy.error &&
+                        normRemedy.summary &&
+                        (!normRemedy.edits || normRemedy.edits.length === 0) &&
+                        !normRemedy.applied && (
+                          <p className="text-xs text-gray-500">Автоматических замен не требуется — проверьте формулировки вручную.</p>
+                        )}
+                    </div>
+                  )}
 
                   {/* Article title and reference */}
                   <div>
@@ -489,6 +808,42 @@ export default function DocumentEditorPage() {
                       <p className="text-xs text-gray-400 mt-0.5">{selectedArticle.norm_text}</p>
                     )}
                   </div>
+
+                  {(selectedArticle.confidence != null || selectedArticle.article_verification) && (
+                    <div className="rounded-xl border border-slate-200/90 bg-gradient-to-br from-slate-50 to-white p-3">
+                      {selectedArticle.confidence != null && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                            Уверенность модели
+                          </span>
+                          <span className="text-lg font-bold tabular-nums tracking-tight text-slate-900">
+                            {selectedArticle.confidence}
+                            <span className="text-sm font-semibold text-slate-500">%</span>
+                          </span>
+                        </div>
+                      )}
+                      {selectedArticle.article_verification?.cited_article_numbers?.length > 0 && (
+                        <p className="mt-2 text-[10px] text-slate-600">
+                          <span className="font-medium text-slate-700">В фрагменте документа: </span>
+                          ст. {selectedArticle.article_verification.cited_article_numbers.join(', ')}
+                        </p>
+                      )}
+                      {selectedArticle.article_verification?.norm_article_number && (
+                        <p className="mt-1 text-[10px] text-slate-600">
+                          <span className="font-medium text-slate-700">В тексте нормы: </span>
+                          ст. {selectedArticle.article_verification.norm_article_number}
+                          {selectedArticle.article_verification.inferred_law_code
+                            ? ` (${selectedArticle.article_verification.inferred_law_code})`
+                            : ''}
+                        </p>
+                      )}
+                      {selectedArticle.article_verification?.label && (
+                        <p className="mt-2 text-[11px] leading-relaxed text-slate-700">
+                          {selectedArticle.article_verification.label}
+                        </p>
+                      )}
+                    </div>
+                  )}
 
                   {/* Applicability */}
                   {selectedArticle.applicability && (

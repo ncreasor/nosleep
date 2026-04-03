@@ -154,6 +154,36 @@ class DocumentErrors(BaseModel):
     errors: list[DocumentError]
 
 
+class DocumentCorrectionCreate(BaseModel):
+    error_id: str | None = None
+    error_type: str
+    title: str | None = None
+    original_text: str
+    suggestion: str
+    reason: str | None = None
+
+
+class DocumentCorrectionResponse(BaseModel):
+    id: int
+    document_id: int
+    user_id: int | None
+    error_id: str | None
+    error_type: str
+    title: str | None
+    original_text: str
+    suggestion: str
+    reason: str | None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class UserStatisticsSummary(BaseModel):
+    corrections_total: int
+    corrections_by_type: dict[str, int]
+
+
 class FolderCreate(BaseModel):
     name: str
     document_type: str

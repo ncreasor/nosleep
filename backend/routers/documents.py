@@ -5,13 +5,26 @@ import json
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from openai import OpenAI
+import anthropic
 
 from database import get_db
-from models import Document, User, AuditLog, Template
-from schemas import DocumentResponse, DocumentUpdate, DocumentSearchResult, DocumentAnalysis, DocumentInsights, DocumentCreate, DocumentErrors, GenerateTemplateRequest, TemplateResponse
+from models import Document, User, AuditLog, Template, DocumentCorrection
+from schemas import (
+    DocumentResponse,
+    DocumentUpdate,
+    DocumentSearchResult,
+    DocumentAnalysis,
+    DocumentInsights,
+    DocumentCreate,
+    DocumentErrors,
+    GenerateTemplateRequest,
+    TemplateResponse,
+    DocumentCorrectionCreate,
+    DocumentCorrectionResponse,
+    UserStatisticsSummary,
+)
 from auth import get_current_user
 from config import settings
 from processing import (
@@ -24,10 +37,12 @@ from processing import (
     extract_definitions,
 )
 from forensics import DocumentForensics, format_forensic_report
+from llm_json import parse_llm_json
+from document_protection import document_to_response, is_reference_contract_protected
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 UPLOAD_DIR = Path("uploads")
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 
 
 async def ensure_upload_dir():
@@ -94,7 +109,7 @@ async def upload_document(
 
     asyncio.create_task(background_process_document(doc.id))
 
-    return doc
+    return document_to_response(doc)
 
 
 @router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
@@ -130,7 +145,7 @@ async def create_document(
     db.add(log)
     await db.commit()
 
-    return doc
+    return document_to_response(doc)
 
 
 @router.get("/search", response_model=list[DocumentSearchResult])
@@ -184,6 +199,27 @@ async def search_documents(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/stats", response_model=UserStatisticsSummary)
+async def get_user_statistics(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    total_r = await db.execute(
+        select(func.count(DocumentCorrection.id)).where(
+            DocumentCorrection.user_id == current_user.id
+        )
+    )
+    total = int(total_r.scalar() or 0)
+
+    by_type_r = await db.execute(
+        select(DocumentCorrection.error_type, func.count(DocumentCorrection.id))
+        .where(DocumentCorrection.user_id == current_user.id)
+        .group_by(DocumentCorrection.error_type)
+    )
+    by_type = {row[0]: int(row[1]) for row in by_type_r.all()}
+    return UserStatisticsSummary(corrections_total=total, corrections_by_type=by_type)
+
+
 @router.get("", response_model=list[DocumentResponse])
 async def list_documents(
     skip: int = 0,
@@ -195,7 +231,7 @@ async def list_documents(
         .offset(skip)
         .limit(limit)
     )
-    return result.scalars().all()
+    return [document_to_response(d) for d in result.scalars().all()]
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)
@@ -209,7 +245,7 @@ async def get_document(
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    return doc
+    return document_to_response(doc)
 
 
 @router.get("/{document_id}/text")
@@ -247,7 +283,7 @@ async def download_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    if not os.path.exists(doc.file_path):
+    if not doc.file_path or not os.path.exists(doc.file_path):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
     return FileResponse(
@@ -264,19 +300,17 @@ async def update_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Document).where(
-            Document.id == document_id, Document.user_id == current_user.id
-        )
-    )
+    result = await db.execute(select(Document).where(Document.id == document_id))
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if doc.user_id is not None and doc.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к документу")
 
     doc.title = schema.title
     await db.commit()
     await db.refresh(doc)
-    return doc
+    return document_to_response(doc)
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -285,16 +319,21 @@ async def delete_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Document).where(
-            Document.id == document_id, Document.user_id == current_user.id
-        )
-    )
+    result = await db.execute(select(Document).where(Document.id == document_id))
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    if os.path.exists(doc.file_path):
+    if doc.user_id is not None and doc.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к документу")
+
+    if is_reference_contract_protected(doc):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Этот демонстрационный договор нельзя удалить",
+        )
+
+    if doc.file_path and os.path.exists(doc.file_path):
         os.remove(doc.file_path)
 
     await db.execute(delete(Document).where(Document.id == document_id))
@@ -326,7 +365,7 @@ async def reprocess_document(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     asyncio.create_task(background_process_document(document_id))
-    return doc
+    return document_to_response(doc)
 
 
 @router.get("/{document_id}/analysis", response_model=DocumentAnalysis)
@@ -438,7 +477,7 @@ async def get_document_errors(
     if not doc.extracted_text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document not yet processed")
 
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     prompt = f"""Analyze this Kazakh legal document and find errors. Focus on:
 1. Incorrect or non-existent law references (wrong article numbers, laws that don't exist)
@@ -465,26 +504,23 @@ Document text:
 {doc.extracted_text[:8000]}"""
 
     try:
-        response = client.chat.completions.create(
-            model=settings.openai_model,
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert in Kazakh law. Analyze legal documents and identify errors. Always respond with valid JSON only."
-                },
                 {
                     "role": "user",
                     "content": prompt
                 }
             ],
+            system="You are an expert in Kazakh law. Analyze legal documents and identify errors. Always respond with valid JSON only.",
             temperature=0.3,
             max_tokens=2000,
         )
 
-        content = response.choices[0].message.content.strip()
+        content = response.content[0].text.strip()
 
         try:
-            data = json.loads(content)
+            data = parse_llm_json(content)
             return DocumentErrors(
                 summary=data.get("summary", ""),
                 errors=[
@@ -509,6 +545,74 @@ Document text:
         import logging
         logging.error(f"Error analyzing document for errors: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/{document_id}/corrections",
+    response_model=DocumentCorrectionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_document_correction(
+    document_id: int,
+    body: DocumentCorrectionCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id, Document.user_id == current_user.id
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    et = (body.error_type or "formulation").strip()[:32]
+    row = DocumentCorrection(
+        document_id=document_id,
+        user_id=current_user.id,
+        error_id=(body.error_id[:64] if body.error_id else None),
+        error_type=et,
+        title=(body.title[:512] if body.title else None),
+        original_text=body.original_text,
+        suggestion=body.suggestion,
+        reason=body.reason,
+    )
+    db.add(row)
+    log = AuditLog(
+        user_id=current_user.id,
+        action="document.correction",
+        resource_type="document",
+        resource_id=document_id,
+        detail=f"type={et}",
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
+@router.get("/{document_id}/corrections", response_model=list[DocumentCorrectionResponse])
+async def list_document_corrections(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id, Document.user_id == current_user.id
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    r = await db.execute(
+        select(DocumentCorrection)
+        .where(DocumentCorrection.document_id == document_id)
+        .order_by(DocumentCorrection.created_at.desc())
+    )
+    return r.scalars().all()
 
 
 @router.post("/{document_id}/generate-template", response_model=TemplateResponse)
@@ -572,34 +676,18 @@ async def generate_template_from_document(
 
 async def _generate_template_content(text: str) -> dict:
     """
-    Use GPT to analyze document and extract template structure with variables.
+    Use Claude to analyze document and extract template structure with variables.
     Returns JSON with sections and variables.
     """
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     # Truncate text to avoid excessive tokens
     truncated_text = text[:6000]
 
     try:
-        response = client.chat.completions.create(
-            model=settings.openai_model,
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
             messages=[
-                {
-                    "role": "system",
-                    "content": """You are a legal document template generator.
-Analyze the provided document and create a reusable template structure.
-
-RULES:
-1. Identify recurring variable parts: names, dates, numbers, addresses, amounts, percentages
-2. Replace variable parts with placeholders like {{variable_id}} using snake_case for ID
-3. Split document into logical sections: header, parties, subject, terms, conditions, signatures, etc.
-4. Keep all legal text unchanged
-5. Return ONLY valid JSON with NO markdown or explanation
-
-Variable types: "text", "date", "number", "multiline", "select"
-For select type, include "options": ["value1", "value2", ...]
-""",
-                },
                 {
                     "role": "user",
                     "content": f"""Analyze this document and create a template structure.
@@ -636,14 +724,26 @@ Return JSON format:
 CRITICAL: Return ONLY JSON, no other text.""",
                 },
             ],
+            system="""You are a legal document template generator.
+Analyze the provided document and create a reusable template structure.
+
+RULES:
+1. Identify recurring variable parts: names, dates, numbers, addresses, amounts, percentages
+2. Replace variable parts with placeholders like {{variable_id}} using snake_case for ID
+3. Split document into logical sections: header, parties, subject, terms, conditions, signatures, etc.
+4. Keep all legal text unchanged
+5. Return ONLY valid JSON with NO markdown or explanation
+
+Variable types: "text", "date", "number", "multiline", "select"
+For select type, include "options": ["value1", "value2", ...]
+""",
             temperature=0.3,
             max_tokens=3000,
         )
 
-        content = response.choices[0].message.content.strip()
+        content = response.content[0].text.strip()
 
-        # Try to parse JSON
-        template_json = json.loads(content)
+        template_json = parse_llm_json(content)
 
         # Validate structure
         if not isinstance(template_json, dict):
@@ -659,7 +759,7 @@ CRITICAL: Return ONLY JSON, no other text.""",
 
     except json.JSONDecodeError as e:
         import logging
-        logging.error(f"Failed to parse GPT template response: {e}")
+        logging.error(f"Failed to parse Claude template response: {e}")
         # Return minimal valid template
         return {
             "document_type": "Документ",
@@ -676,5 +776,5 @@ CRITICAL: Return ONLY JSON, no other text.""",
 
     except Exception as e:
         import logging
-        logging.error(f"Error calling GPT for template generation: {e}")
+        logging.error(f"Error calling Claude for template generation: {e}")
         raise
