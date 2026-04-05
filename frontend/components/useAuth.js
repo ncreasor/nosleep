@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
@@ -36,7 +36,10 @@ export function useAuth({ redirect = true } = {}) {
   }
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
-  const authHeaders = token ? { Authorization: `Bearer ${token}` } : {}
+  const authHeaders = useMemo(
+    () => (token ? { Authorization: `Bearer ${token}` } : {}),
+    [token]
+  )
 
   return { user, loading, logout, authHeaders }
 }

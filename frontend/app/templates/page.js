@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Sidebar from '@/components/Sidebar'
 import { useAuth } from '@/components/useAuth'
-import { Search, Plus, ChevronDown, ChevronRight, MoreHorizontal, FileUp, Loader2, Upload } from 'lucide-react'
+import { Search, Plus, ChevronDown, ChevronRight, MoreHorizontal, FileUp, Loader2, Upload, FileText } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
 
@@ -51,6 +51,13 @@ export default function TemplatesPage() {
   const [docxLoading, setDocxLoading] = useState(false)
   const [docxDropActive, setDocxDropActive] = useState(false)
 
+  const [docTemplateModal, setDocTemplateModal] = useState(false)
+  const [documentsList, setDocumentsList] = useState([])
+  const [docPickLoading, setDocPickLoading] = useState(false)
+  const [docGenLoading, setDocGenLoading] = useState(false)
+  const [selectedDocId, setSelectedDocId] = useState(null)
+  const [docTemplateError, setDocTemplateError] = useState(null)
+
   useEffect(() => {
     if (authLoading) return
     fetchFolders()
@@ -93,6 +100,60 @@ export default function TemplatesPage() {
       ...prev,
       [folderId]: !prev[folderId],
     }))
+  }
+
+  const openDocTemplateModal = async () => {
+    setDocTemplateModal(true)
+    setDocPickLoading(true)
+    setDocTemplateError(null)
+    setSelectedDocId(null)
+    setNewTemplateFolderId(folders[0]?.id ?? null)
+    try {
+      const r = await fetch(`${BACKEND}/documents`, { headers: authHeaders })
+      if (r.ok) {
+        const data = await r.json()
+        setDocumentsList(Array.isArray(data) ? data : [])
+      } else {
+        setDocTemplateError('Не удалось загрузить список документов')
+      }
+    } catch {
+      setDocTemplateError('Не удалось загрузить список документов')
+    } finally {
+      setDocPickLoading(false)
+    }
+  }
+
+  const generateTemplateFromDocument = async () => {
+    if (!selectedDocId) return
+    setDocGenLoading(true)
+    setDocTemplateError(null)
+    try {
+      const res = await fetch(`${BACKEND}/documents/${selectedDocId}/generate-template`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          folder_id: newTemplateFolderId,
+          name: null,
+        }),
+      })
+      if (!res.ok) {
+        let detail = 'Ошибка генерации'
+        try {
+          const err = await res.json()
+          if (err.detail) detail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail)
+        } catch { /* ignore */ }
+        setDocTemplateError(detail)
+        return
+      }
+      const created = await res.json()
+      setDocTemplateModal(false)
+      fetchFolders()
+      router.push(`/templates/${created.id}`)
+    } catch (e) {
+      setDocTemplateError(e.message || 'Ошибка')
+    } finally {
+      setDocGenLoading(false)
+    }
   }
 
   const handleCreateTemplate = async () => {
@@ -288,6 +349,14 @@ export default function TemplatesPage() {
               </button>
               <button
                 type="button"
+                onClick={openDocTemplateModal}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-ink font-semibold rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                <FileText size={18} />
+                Из документа
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setShowNewTemplate(true)
                   setTemplateName('')
@@ -359,7 +428,9 @@ export default function TemplatesPage() {
                   ))}
                 </div>
                 {(!templateFolders.__root || templateFolders.__root.length === 0) && (
-                  <p className="text-center text-gray-400 text-sm py-8">Шаблонов пока нет — загрузите Word (.doc / .docx) или создайте пустой.</p>
+                  <p className="text-center text-gray-400 text-sm py-8">
+                    Шаблонов пока нет — из документа, из Word (.doc / .docx) или пустой шаблон.
+                  </p>
                 )}
               </div>
             ) : (
@@ -485,6 +556,85 @@ export default function TemplatesPage() {
                 className="flex-1 bg-[#AAFF45] hover:bg-[#9FEA3A] text-ink font-semibold py-2 rounded-full text-sm disabled:opacity-60 transition-colors"
               >
                 Создать
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {docTemplateModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-lg p-6 max-h-[85vh] flex flex-col">
+            <h2 className="font-bold text-ink text-base mb-1">Шаблон из документа</h2>
+            <p className="text-xs text-gray-500 mb-4">
+              Даты и ФИО физлиц заменяются на поля; наименования организаций (ТОО, АО и т.д.) и правовая структура сохраняются. Дальше можно править текст в редакторе.
+            </p>
+            {docTemplateError && (
+              <p className="text-xs text-red-600 mb-2">{docTemplateError}</p>
+            )}
+            {folders.length > 0 && (
+              <>
+                <label className="block text-xs text-gray-500 mb-1">Папка</label>
+                <select
+                  value={newTemplateFolderId ?? ''}
+                  onChange={(e) => setNewTemplateFolderId(e.target.value ? Number(e.target.value) : null)}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm mb-3"
+                >
+                  <option value="">Без папки</option>
+                  {folders.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            <div className="flex-1 min-h-0 overflow-y-auto border border-gray-100 rounded-xl mb-4">
+              {docPickLoading ? (
+                <div className="flex justify-center py-12 text-gray-400">
+                  <Loader2 size={24} className="animate-spin" />
+                </div>
+              ) : documentsList.length === 0 ? (
+                <p className="text-sm text-gray-500 p-4 text-center">Нет документов — загрузите в разделе «Документы».</p>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {documentsList.map((d) => (
+                    <li key={d.id}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedDocId(d.id)}
+                        className={`w-full text-left px-4 py-3 text-sm transition-colors ${
+                          selectedDocId === d.id
+                            ? 'bg-[#f4ffe8] text-ink font-medium'
+                            : 'text-gray-800 hover:bg-gray-50'
+                        }`}
+                      >
+                        <span className="line-clamp-2">{d.title || `Документ #${d.id}`}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setDocTemplateModal(false)
+                  setDocTemplateError(null)
+                }}
+                className="flex-1 border border-gray-200 text-gray-600 font-medium py-2 rounded-full text-sm hover:bg-gray-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={generateTemplateFromDocument}
+                disabled={!selectedDocId || docGenLoading}
+                className="flex-1 bg-[#AAFF45] hover:bg-[#9FEA3A] text-ink font-semibold py-2 rounded-full text-sm disabled:opacity-60 flex items-center justify-center gap-2"
+              >
+                {docGenLoading ? <Loader2 size={18} className="animate-spin" /> : null}
+                Создать шаблон
               </button>
             </div>
           </div>

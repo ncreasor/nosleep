@@ -63,6 +63,8 @@ class Document(Base):
     language = Column(String, nullable=True, default="kk")
     qdrant_id = Column(String, nullable=True, index=True)
     extracted_text = Column(Text, nullable=True)
+    saved_analysis_json = Column(Text, nullable=True)
+    saved_changes_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

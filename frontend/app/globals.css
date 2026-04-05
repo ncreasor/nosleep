@@ -73,6 +73,16 @@
 .editor-body em { font-style: italic; }
 .editor-body u { text-decoration: underline; }
 
+.editor-body .template-placeholder {
+  display: inline-block;
+  min-width: 7rem;
+  padding: 0 0.125rem 0.1rem;
+  border-bottom: 1px solid #9ca3af;
+  color: #6b7280;
+  font-size: 0.9em;
+  vertical-align: baseline;
+}
+
 /* Norm highlighting */
 .norm-highlight {
   border-radius: 2px;

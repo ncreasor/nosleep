@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24 * 7
     cors_origins: list[str] = ["*"]
     max_file_size_mb: int = 20
+    law_grounding_max_concurrency: int = 6
 
     class Config:
         env_file = ".env"

@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 
@@ -259,7 +260,19 @@ async def update_template(
     if template_data.description is not None:
         template.description = template_data.description
     if template_data.content is not None:
-        template.content = template_data.content
+        try:
+            old = json.loads(template.content) if template.content else {}
+            new = json.loads(template_data.content)
+            if (
+                isinstance(old, dict)
+                and isinstance(new, dict)
+                and old.get("structured")
+                and "structured" not in new
+            ):
+                new["structured"] = old["structured"]
+            template.content = json.dumps(new, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            template.content = template_data.content
     if template_data.folder_id is not None:
         template.folder_id = template_data.folder_id
     if template_data.tags is not None:

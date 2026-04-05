@@ -157,6 +157,171 @@ def _guess_law_code(title: str, sphere: str) -> Optional[str]:
     return None
 
 
+_FULL_REF_RE = re.compile(
+    r'(?:статьей|статьями|стать[яиею]|ст\.?)\s+(\d+(?:\s*,\s*\d+)*)\s+'
+    r'(Трудового кодекса(?:\s+Республики\s+Казахстан)?|ТК\s+РК'
+    r'|Гражданского кодекса(?:\s+(?:Республики\s+Казахстан|РК))?|ГК\s+РК'
+    r'|Уголовного кодекса(?:\s+РК)?|УК\s+РК'
+    r'|Налогового кодекса(?:\s+РК)?|НК\s+РК'
+    r'|Гражданского процессуального кодекса(?:\s+РК)?|ГПК\s+РК'
+    r'|Уголовно-процессуального кодекса(?:\s+РК)?|УПК\s+РК'
+    r'|Кодекс[аеу]?\s+об\s+административных\s+правонарушениях|КоАП\s+РК'
+    r'|Жилищного кодекса(?:\s+РК)?|ЖК\s+РК'
+    r'|Семейного кодекса(?:\s+РК)?|СК\s+РК'
+    r'|Земельного кодекса(?:\s+РК)?|ЗК\s+РК'
+    r'|Закона\s+РК[^"]{0,60})',
+    re.IGNORECASE,
+)
+
+
+def _validate_all_references(text: str) -> list[dict[str, Any]]:
+    """Extract every norm reference from document text and validate against the local DB."""
+    from laws_validator import validate_norm, LAW_ABBREVIATIONS
+
+    if not text:
+        return []
+
+    seen: set[str] = set()
+    results: list[dict[str, Any]] = []
+
+    for m in _FULL_REF_RE.finditer(text):
+        articles_str = m.group(1)
+        law_part = m.group(2).strip()
+
+        for art_num in re.split(r'\s*,\s*', articles_str):
+            art_num = art_num.strip()
+            if not art_num:
+                continue
+            ref_text = f"ст. {art_num} {law_part}"
+            key = f"{art_num}|{law_part}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            validation = validate_norm(ref_text)
+
+            # Try to extract the matched context (surrounding text)
+            start = max(0, m.start() - 30)
+            end = min(len(text), m.end() + 60)
+            context = text[start:end].replace('\n', ' ').strip()
+
+            # Detect fantasy markers in context
+            ctx_lower = context.lower()
+            fantasy = False
+            fantasy_markers = [
+                "криптовалют", "блокчейн", "пандеми", "киберугроз",
+                "геолокаци", "запрещается выходить на пенсию",
+                "неограниченн", "виртуальн", "цифровую эпоху",
+                "обязательная трудовая деятельность", "контроле за передвижением",
+            ]
+            for marker in fantasy_markers:
+                if marker in ctx_lower:
+                    fantasy = True
+                    break
+
+            is_valid = validation.get("valid", False)
+            # Articles > 400 in ТК РК are suspicious
+            try:
+                art_int = int(art_num)
+            except ValueError:
+                art_int = 0
+
+            suspicious = art_int > 400 and not is_valid
+
+            results.append({
+                "reference": ref_text,
+                "article_number": art_num,
+                "law_code": validation.get("law_code") or law_part,
+                "original_text": m.group(0).strip(),
+                "context": context,
+                "valid": is_valid,
+                "status": validation.get("status", "invalid"),
+                "title": validation.get("title"),
+                "reason": validation.get("reason"),
+                "fantasy": fantasy,
+                "suspicious": suspicious,
+            })
+
+    return results
+
+
+_FANTASY_DOC_MARKERS = (
+    "криптовалют",
+    "блокчейн",
+    "блокчейн-",
+    "пандеми",
+    "киберугроз",
+    "геолокаци",
+    "запрещается выходить на пенсию",
+    "неограниченн",
+    "виртуальн",
+    "цифровую эпоху",
+    "обязательная трудовая деятельность",
+    "контроле за передвижением",
+)
+
+
+def _fantasy_topic_mismatch(doc_chunk: str, law_text: str) -> bool:
+    dl = (doc_chunk or "").lower()
+    ll = (law_text or "").lower()
+    for m in _FANTASY_DOC_MARKERS:
+        if m in dl and m not in ll:
+            return True
+    if "пенси" in dl and "запрещ" in dl and "пенс" not in ll and "пенси" not in ll:
+        return True
+    return False
+
+
+def _adjust_grounding_after_llm(
+    grounding: dict[str, Any],
+    doc_chunk: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Reject grounding when doc cites wrong articles or fantasy clauses vs law text."""
+    g = dict(grounding)
+    law_full = (payload.get("text") or "").strip()
+
+    if _fantasy_topic_mismatch(doc_chunk, law_full):
+        g["verdict"] = "not_applicable"
+        g["selected_index"] = None
+        g["grounding_confidence"] = min(int(g.get("grounding_confidence") or 0), 15)
+        g["rationale"] = (
+            "Формулировки во фрагменте документа не подтверждаются текстом найденной нормы "
+            "(в т.ч. нетипичные или вымышленные предметы регулирования)."
+        )
+        return g
+
+    cited = _extract_article_numbers_from_text(doc_chunk)
+    norm_art = _extract_primary_article_from_law_chunk(law_full)
+
+    if cited and norm_art and norm_art not in cited:
+        g["verdict"] = "not_applicable"
+        g["selected_index"] = None
+        g["grounding_confidence"] = min(int(g.get("grounding_confidence") or 0), 20)
+        g["rationale"] = (
+            "Номер статьи в найденной норме не совпадает со ссылками во фрагменте документа."
+        )
+        return g
+
+    suspicious_high = 500
+    if norm_art:
+        for c in cited:
+            if not str(c).isdigit():
+                continue
+            ci = int(c)
+            if ci >= suspicious_high and c != norm_art:
+                g["verdict"] = "not_applicable"
+                g["selected_index"] = None
+                g["grounding_confidence"] = min(int(g.get("grounding_confidence") or 0), 25)
+                g["rationale"] = (
+                    "Во фрагменте указаны ссылки на статьи с крупными номерами, "
+                    "не совпадающие с найденной нормой — подтверждать соответствие нельзя."
+                )
+                return g
+
+    return g
+
+
 def _score_to_confidence(score: float) -> tuple[int, str]:
     s = max(0.0, min(1.0, float(score)))
     pct = int(round(s * 100))
@@ -175,6 +340,7 @@ def _law_point_to_article(
     payload: dict[str, Any],
     doc_chunk: str,
     point_id: Any,
+    grounding: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     from laws_validator import validate_norm
 
@@ -227,7 +393,7 @@ def _law_point_to_article(
         applicability_parts.append(law_snip)
     applicability = " ".join(applicability_parts)[:1100]
 
-    return {
+    out: dict[str, Any] = {
         "norm_text": norm_text,
         "title": title,
         "status": "valid" if is_active else "outdated",
@@ -244,6 +410,7 @@ def _law_point_to_article(
         "law_url": payload.get("url"),
         "law_chunk_preview": law_snip,
         "confidence": confidence_pct,
+        "semantic_similarity_pct": confidence_pct,
         "confidence_level": confidence_level,
         "relevance_score": round(float(score), 6),
         "article_verification": {
@@ -262,6 +429,14 @@ def _law_point_to_article(
         "qdrant_point_id": str(point_id),
         "match_method": "qdrant_semantic_zembed",
     }
+    if grounding is not None:
+        out["grounding"] = {
+            "verdict": grounding.get("verdict"),
+            "grounding_confidence": grounding.get("grounding_confidence"),
+            "rationale": grounding.get("rationale"),
+            "selected_index": grounding.get("selected_index"),
+        }
+    return out
 
 
 async def match_document_to_laws(
@@ -270,6 +445,7 @@ async def match_document_to_laws(
     language: str = "rus",
     top_k_per_chunk: int = 5,
     max_results: int = 28,
+    verify_facts: bool = True,
 ) -> dict[str, Any]:
     text = (document_text or "").strip()
     if not text:
@@ -279,6 +455,7 @@ async def match_document_to_laws(
                 "document_chunks": 0,
                 "collection": settings.qdrant_laws_collection,
                 "truncated": False,
+                "verify_facts": verify_facts,
             },
         }
 
@@ -296,6 +473,7 @@ async def match_document_to_laws(
                 "document_chunks": 0,
                 "collection": settings.qdrant_laws_collection,
                 "truncated": False,
+                "verify_facts": verify_facts,
             },
         }
 
@@ -339,38 +517,110 @@ async def match_document_to_laws(
     ]
     nested = await asyncio.gather(*tasks)
 
-    best: dict[Any, dict[str, Any]] = {}
-    for group in nested:
-        for point_id, score, payload, doc_chunk in group:
-            prev = best.get(point_id)
-            if prev is None or score > prev["score"]:
-                best[point_id] = {
+    if verify_facts:
+        from law_grounding import verify_chunks_batched
+
+        groundings = await verify_chunks_batched(
+            chunks,
+            nested,
+            settings.law_grounding_max_concurrency,
+        )
+
+        grounded_rows: list[dict[str, Any]] = []
+        for i, group in enumerate(nested):
+            g = groundings[i]
+            idx = g.get("selected_index")
+            verdict = str(g.get("verdict") or "")
+            if verdict == "not_applicable" or idx is None:
+                continue
+            if not group or idx >= len(group):
+                continue
+            point_id, score, payload, doc_chunk = group[idx]
+            g = _adjust_grounding_after_llm(g, doc_chunk, payload)
+            if g.get("verdict") == "not_applicable" or g.get("selected_index") is None:
+                continue
+            grounded_rows.append(
+                {
+                    "point_id": point_id,
                     "score": score,
                     "payload": payload,
                     "doc_chunk": doc_chunk,
+                    "grounding": g,
                 }
+            )
 
-    ordered = sorted(
-        best.items(),
-        key=lambda kv: kv[1]["score"],
-        reverse=True,
-    )[:max_results]
+        best_ground: dict[Any, dict[str, Any]] = {}
+        for row in grounded_rows:
+            pid = row["point_id"]
+            prev = best_ground.get(pid)
+            gc = int(row["grounding"].get("grounding_confidence") or 0)
+            if prev is None or gc > int(
+                prev["grounding"].get("grounding_confidence") or 0
+            ):
+                best_ground[pid] = row
 
-    articles = [
-        _law_point_to_article(
-            score=item["score"],
-            payload=item["payload"],
-            doc_chunk=item["doc_chunk"],
-            point_id=pid,
-        )
-        for pid, item in ordered
-    ]
+        ordered_rows = sorted(
+            best_ground.values(),
+            key=lambda r: (
+                int(r["grounding"].get("grounding_confidence") or 0),
+                float(r["score"]),
+            ),
+            reverse=True,
+        )[:max_results]
+
+        articles = [
+            _law_point_to_article(
+                score=item["score"],
+                payload=item["payload"],
+                doc_chunk=item["doc_chunk"],
+                point_id=item["point_id"],
+                grounding=item["grounding"],
+            )
+            for item in ordered_rows
+        ]
+    else:
+        best: dict[Any, dict[str, Any]] = {}
+        for group in nested:
+            for point_id, score, payload, doc_chunk in group:
+                prev = best.get(point_id)
+                if prev is None or score > prev["score"]:
+                    best[point_id] = {
+                        "score": score,
+                        "payload": payload,
+                        "doc_chunk": doc_chunk,
+                    }
+
+        ordered = sorted(
+            best.items(),
+            key=lambda kv: kv[1]["score"],
+            reverse=True,
+        )[:max_results]
+
+        articles = [
+            _law_point_to_article(
+                score=item["score"],
+                payload=item["payload"],
+                doc_chunk=item["doc_chunk"],
+                point_id=pid,
+            )
+            for pid, item in ordered
+        ]
+
+    # Validate all norm references in the document against local DB
+    ref_checks = _validate_all_references(text)
+    invalid_refs = [r for r in ref_checks if not r["valid"]]
+    valid_refs = [r for r in ref_checks if r["valid"]]
 
     return {
         "articles": articles,
+        "reference_checks": ref_checks,
         "meta": {
             "document_chunks": len(chunks),
             "collection": collection,
             "truncated": truncated,
+            "verify_facts": verify_facts,
+            "total_references": len(ref_checks),
+            "valid_references": len(valid_refs),
+            "invalid_references": len(invalid_refs),
         },
     }

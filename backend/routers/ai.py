@@ -539,34 +539,51 @@ class ExplainErrorRequest(BaseModel):
 
 @router.post("/explain-error")
 async def explain_error(request: ExplainErrorRequest):
-    """Get detailed explanation of why a text is an error and how to fix it."""
+    """Get detailed explanation of why a text is an error — grounded in RAG evidence."""
     try:
-        prompt = f"""You are a legal expert in Kazakh law. A user has found an error in a legal document.
+        from laws_rag import LawsRAG
 
-Error title: {request.error_title}
-Original text (incorrect): "{request.original_text}"
-Suggested correction: "{request.suggestion}"
-Reason: {request.reason}
+        # Search for relevant law text to ground the explanation
+        rag = LawsRAG()
+        search_query = f"{request.error_title} {request.original_text}"[:200]
+        rag_context = ""
+        try:
+            rag_results = await rag.search(
+                query=search_query, language="rus", top_k=3, use_reranking=False,
+            )
+            for r in rag_results:
+                rag_context += f"--- {r['title']} ({r.get('number', '')}) ---\n"
+                rag_context += f"Статус: {'действует' if r.get('is_active') else 'утратил силу'}\n"
+                rag_context += f"{r['text'][:500]}\n\n"
+        except Exception as rag_err:
+            logger.warning("RAG search for explain-error failed: %s", rag_err)
 
-Document context (first part): {request.document_context[:1000]}
+        prompt = f"""Ты юридический эксперт по праву РК. Пользователь нашёл ошибку в юридическом документе.
 
-Please provide:
-1. A detailed explanation (2-3 sentences) of why the original text is wrong in the context of Kazakh law
-2. A concrete example of how this error might affect the document
-3. Any relevant legal references or rules that apply
+Название ошибки: {request.error_title}
+Оригинальный текст (некорректный): "{request.original_text}"
+Предложенная правка: "{request.suggestion}"
+Причина: {request.reason}
 
-Respond in Russian. Be concise and professional."""
+Контекст документа: {request.document_context[:1000]}
+
+ФРАГМЕНТЫ ИЗ БАЗЫ ЗАКОНОДАТЕЛЬСТВА:
+{rag_context if rag_context else "Релевантные нормы не найдены в базе."}
+
+Объясни:
+1. Почему оригинальный текст ошибочен (2-3 предложения) — ссылайся ТОЛЬКО на фрагменты из базы выше.
+2. Конкретный пример того, как ошибка может повлиять на документ.
+3. Ссылки на нормы — ТОЛЬКО те, что есть во фрагментах выше. Не выдумывай ссылки.
+
+Если во фрагментах из базы нет подтверждения ошибки, честно укажи: "Не удалось подтвердить ошибку по базе законодательства."
+
+Отвечай на русском. Кратко и профессионально."""
 
         response = claude_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            system="You are an expert in Kazakh law and legal document analysis. Provide clear, professional explanations.",
-            temperature=0.5,
+            messages=[{"role": "user", "content": prompt}],
+            system="Ты эксперт по праву РК. Объясняешь ошибки ТОЛЬКО на основании предоставленных фрагментов из базы. Не выдумывай ссылки на нормы.",
+            temperature=0.3,
             max_tokens=600,
         )
 
@@ -576,7 +593,8 @@ Respond in Russian. Be concise and professional."""
             "explanation": explanation,
             "error_title": request.error_title,
             "original_text": request.original_text,
-            "suggestion": request.suggestion
+            "suggestion": request.suggestion,
+            "grounded": bool(rag_context.strip()),
         }
 
     except Exception as e:
@@ -737,11 +755,126 @@ async def validate_articles_handler(request: ArticlesValidationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class LawChronologyRequest(BaseModel):
+    query: str
+    title: str = ""
+    sphere: str | None = None
+    language: str = "rus"
+    top_k: int = 15
+
+
+@router.post("/law-chronology")
+async def law_chronology(request: LawChronologyRequest):
+    """
+    Semantic search for related laws ordered by date from Qdrant payload.
+    Returns a grounded timeline of related legislation.
+    """
+    try:
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from zeroentropy import ZeroEntropy
+
+        ze = ZeroEntropy(api_key=settings.zeroentropy_api_key)
+        qdrant = QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_service_api_key or None,
+            timeout=30.0,
+        )
+
+        # Embed query
+        embed_resp = ze.models.embed(
+            model="zembed-1",
+            input=[request.query[:500]],
+            input_type="document",
+            dimensions=1280,
+            encoding_format="float",
+        )
+        vector = embed_resp.results[0].embedding[:1280]
+
+        # Build filter
+        conditions = []
+        if request.language:
+            conditions.append(FieldCondition(key="language", match=MatchValue(value=request.language)))
+        if request.sphere:
+            conditions.append(FieldCondition(key="sphere", match=MatchValue(value=request.sphere)))
+        flt = Filter(must=conditions) if conditions else None
+
+        results = qdrant.search(
+            collection_name=settings.qdrant_laws_collection,
+            query_vector=vector,
+            query_filter=flt,
+            limit=request.top_k,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        # Deduplicate by title+number and collect entries
+        seen: dict[str, dict] = {}
+        for hit in results:
+            p = hit.payload or {}
+            title = (p.get("title") or "").strip()
+            number = (p.get("number") or "").strip()
+            key = f"{title}|{number}"
+            if key in seen:
+                continue
+            date_raw = (p.get("date") or "").strip()
+            seen[key] = {
+                "title": title or "Норма РК",
+                "number": number,
+                "date": date_raw,
+                "status": p.get("status", ""),
+                "is_active": p.get("is_active", True),
+                "sphere": p.get("sphere", ""),
+                "text_preview": (p.get("text") or "")[:300].strip(),
+                "url": p.get("url", ""),
+                "relevance_score": round(float(hit.score), 4),
+                "point_id": str(hit.id),
+            }
+
+        entries = list(seen.values())
+
+        # Sort by date (entries with dates first, then by date ascending)
+        def sort_key(e):
+            d = e.get("date") or ""
+            return (0 if d else 1, d)
+
+        entries.sort(key=sort_key)
+
+        # Split into current law versions and related laws
+        # The first entry with highest relevance is likely the "main" match
+        main_title = request.title.lower().strip() if request.title else ""
+        timeline = []
+        related = []
+        for e in entries:
+            e_title = e["title"].lower()
+            # If the title contains a significant overlap with the query title, it's the same law
+            if main_title and (main_title in e_title or e_title in main_title):
+                timeline.append(e)
+            else:
+                related.append(e)
+
+        # If nothing matched as "timeline", just put everything in timeline
+        if not timeline:
+            timeline = entries
+            related = []
+
+        return {
+            "timeline": timeline,
+            "related": related,
+            "total": len(entries),
+        }
+
+    except Exception as e:
+        logger.error(f"Error in law chronology: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class AnalyzeDocumentRequest(BaseModel):
     document_text: str
     language: str = "rus"
     top_k_per_chunk: int = 5
     max_results: int = 28
+    verify_facts: bool = True
 
 
 class CheckNormsRequest(BaseModel):
@@ -788,8 +921,8 @@ async def laws_search(request: LawsSearchRequest):
 @router.post("/analyze-legal-norms")
 async def analyze_legal_norms(request: AnalyzeDocumentRequest):
     """
-    Semantic match: document chunks are embedded (zembed-1) and searched against
-    Qdrant collection `zan_legal_docs` (same vectors as adilet.zan.kz pipeline).
+    Embed document chunks (zembed-1), search Qdrant `zan_legal_docs`, optionally
+    verify each chunk against top-k candidates with Claude (grounding).
     """
     try:
         if not request.document_text or not isinstance(request.document_text, str):
@@ -802,6 +935,7 @@ async def analyze_legal_norms(request: AnalyzeDocumentRequest):
             language=request.language,
             top_k_per_chunk=request.top_k_per_chunk,
             max_results=request.max_results,
+            verify_facts=request.verify_facts,
         )
         return result
 
@@ -815,60 +949,117 @@ async def analyze_legal_norms(request: AnalyzeDocumentRequest):
 @router.post("/check-norms")
 async def check_norms(request: CheckNormsRequest):
     """
-    Check legal norm references for details, amendments, status, etc.
-    Returns comprehensive information for each norm including chronology and related laws.
+    Check legal norm references — grounded in local DB + Qdrant RAG.
+    Only returns facts that can be substantiated by retrieved evidence.
     """
     try:
         if not request.norms or not isinstance(request.norms, list):
             return {"results": {}}
 
-        norms_text = '\n'.join([f'{i + 1}. "{n}"' for i, n in enumerate(request.norms)])
+        from laws_validator import validate_norm
+        from laws_rag import LawsRAG
 
-        response = claude_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Check the following legal norm references from Kazakh legislation. For each, return a comprehensive analysis including status, title, chronology, detailed explanation, related laws, and common formulation issues.
+        rag = LawsRAG()
+        results: dict[str, dict] = {}
 
-Norms to check:
-{norms_text}
+        for norm_ref in request.norms:
+            # Step 1: Check local law database (ground truth)
+            db_result = validate_norm(norm_ref)
 
-Return as JSON object where each key is the norm reference text (exactly as provided):
-{{ "norm1": {{ status, title, introduced, amendments, current_status_explanation, status_since, replaced_by, is_latest_amendment, analysis, related_laws, formulation_issues }}, "norm2": {{...}} }}""",
-                },
-            ],
-            system="""You are a legal reference system specializing in the legislation of the Republic of Kazakhstan (RK/РК).
-You have knowledge of Kazakh legal codes: ГК РК (Civil Code), ТК РК (Labor Code), УК РК (Criminal Code),
-УПК РК, ГПК РК (Civil Procedure Code), КоАП РК, НК РК (Tax Code), ЗК РК (Land Code), ЖК РК (Housing Code), СК РК (Family Code).
+            # Step 2: Search Qdrant for actual law text
+            rag_results = await rag.search(
+                query=norm_ref, language="rus", top_k=3, use_reranking=False,
+            )
+            rag_context = ""
+            rag_sources = []
+            for r in rag_results:
+                rag_context += f"--- {r['title']} ({r.get('number', '')}) ---\n"
+                rag_context += f"Статус: {'действует' if r.get('is_active') else 'утратил силу'}\n"
+                rag_context += f"Текст: {r['text'][:600]}\n\n"
+                rag_sources.append({
+                    "title": r.get("title", ""),
+                    "number": r.get("number", ""),
+                    "is_active": r.get("is_active", False),
+                    "url": r.get("url", ""),
+                })
 
-For each legal norm reference provided, return a JSON object with:
-- "status": one of "valid" (norm exists and is in force), "outdated" (norm exists but has been superseded or amended, or is from an old version), "invalid" (norm does not exist)
-- "title": the official name/title of the article or law, null if unknown
-- "introduced": ISO date string (YYYY-MM-DD) when the norm was first introduced, null if unknown
-- "amendments": array of { "date": "YYYY-MM-DD", "description": "brief description in Russian" }, max 5, empty if none
-- "current_status_explanation": 1-2 sentences in Russian explaining the current status
-- "status_since": ISO date string (YYYY-MM-DD) when norm acquired its current status, null if unknown
-- "replaced_by": string describing what replaced this norm (if status is "outdated"), null otherwise
-- "is_latest_amendment": boolean true if using latest version, false if using older version
-- "analysis": 2-3 sentence description in Russian of what this norm regulates, its scope, and who it applies to
-- "related_laws": array of max 3 objects { "title": "official name", "number": "code abbreviation", "relevance": "brief explanation" } of related laws in the same domain
-- "formulation_issues": array of max 3 objects { "type": "category", "description": "common mistake in Russian", "suggestion": "how to fix it" } - common errors when citing this norm in contracts/documents
+            # Step 3: Build result from DB facts first
+            entry: dict = {
+                "status": db_result.get("status", "invalid"),
+                "title": db_result.get("title"),
+                "introduced": db_result.get("introduced"),
+                "amendments": [],
+                "current_status_explanation": "",
+                "status_since": None,
+                "replaced_by": None,
+                "is_latest_amendment": None,
+                "analysis": "",
+                "related_laws": [],
+                "formulation_issues": [],
+                "grounded": db_result.get("valid", False),
+                "source": "database" if db_result.get("valid") else "not_found",
+                "rag_sources": rag_sources,
+            }
 
-Respond ONLY with valid JSON. No markdown, no explanation outside JSON.""",
-            temperature=0.3,
-            max_tokens=2000,
-        )
+            if not db_result.get("valid"):
+                entry["current_status_explanation"] = db_result.get("reason") or "Норма не найдена в локальной базе данных."
 
-        content = response.content[0].text.strip()
+            # Step 4: If we have RAG context, ask Claude to analyze ONLY from evidence
+            if rag_context.strip():
+                entry["source"] = "database+rag" if db_result.get("valid") else "rag_only"
+                try:
+                    response = claude_client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        messages=[{
+                            "role": "user",
+                            "content": f"""Проанализируй норму "{norm_ref}" ТОЛЬКО на основании приведённых ниже фрагментов из базы законодательства РК.
 
-        try:
-            json_response = parse_llm_json(content)
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse Claude norm check response: {content}")
-            return {"results": {}}
+Результат проверки по локальной базе:
+- Статус: {db_result.get('status', 'unknown')}
+- Название статьи: {db_result.get('title') or 'не найдено'}
+- Закон: {db_result.get('law_name') or 'не определён'}
 
-        return {"results": json_response}
+Фрагменты из базы Qdrant:
+{rag_context}
+
+ВАЖНО:
+- НЕ выдумывай поправки, даты или замены — если информации нет в фрагментах выше, пиши null.
+- Поле "analysis" — только то, что следует из текста фрагментов.
+- "amendments" — только если в тексте явно упомянуты изменения.
+- Если норма не найдена ни в базе, ни во фрагментах — status: "invalid".
+
+Верни ТОЛЬКО JSON:
+{{
+  "current_status_explanation": "1-2 предложения на основе фрагментов",
+  "analysis": "2-3 предложения о предмете регулирования на основе фрагментов, или пустая строка если нет данных",
+  "amendments": [],
+  "replaced_by": null,
+  "formulation_issues": []
+}}""",
+                        }],
+                        system="Ты юридический справочник РК. Отвечай ТОЛЬКО на основании предоставленных фрагментов. Не придумывай факты. Отвечай только валидным JSON.",
+                        temperature=0.1,
+                        max_tokens=800,
+                    )
+
+                    llm_data = parse_llm_json(response.content[0].text.strip())
+                    if isinstance(llm_data, dict):
+                        if llm_data.get("current_status_explanation"):
+                            entry["current_status_explanation"] = llm_data["current_status_explanation"]
+                        if llm_data.get("analysis"):
+                            entry["analysis"] = llm_data["analysis"]
+                        if isinstance(llm_data.get("amendments"), list):
+                            entry["amendments"] = llm_data["amendments"]
+                        if llm_data.get("replaced_by"):
+                            entry["replaced_by"] = llm_data["replaced_by"]
+                        if isinstance(llm_data.get("formulation_issues"), list):
+                            entry["formulation_issues"] = llm_data["formulation_issues"]
+                except Exception as llm_err:
+                    logger.warning("LLM enrichment for norm %s failed: %s", norm_ref, llm_err)
+
+            results[norm_ref] = entry
+
+        return {"results": results}
 
     except Exception as e:
         logger.error(f"Error checking norms: {e}")
