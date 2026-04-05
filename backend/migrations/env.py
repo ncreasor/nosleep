@@ -7,7 +7,7 @@ from alembic import context
 
 # import models
 from database import Base
-from models import Document, User, Chat, ChatMessage, AuditLog
+from models import Document, User, Chat, ChatMessage, AuditLog, DocumentCorrection
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

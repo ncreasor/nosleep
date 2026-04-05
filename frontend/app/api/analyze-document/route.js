@@ -2,17 +2,19 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:800
 
 export async function POST(request) {
   try {
-    const { document_text } = await request.json()
+    const { document_text, verify_facts } = await request.json()
 
     if (!document_text || typeof document_text !== 'string') {
       return Response.json({ error: 'document_text is required' }, { status: 400 })
     }
 
-    // Delegate to backend for secure OpenAI processing
+    const body = { document_text }
+    if (typeof verify_facts === 'boolean') body.verify_facts = verify_facts
+
     const backendResponse = await fetch(`${BACKEND_URL}/ai/analyze-legal-norms`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ document_text }),
+      body: JSON.stringify(body),
     })
 
     if (!backendResponse.ok) {

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models import User, Document, AuditLog
 from schemas import UserResponse, DocumentResponse, AuditLogResponse
+from document_protection import document_to_response
 from auth import get_current_user
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -68,7 +69,7 @@ async def list_all_documents(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(Document).offset(skip).limit(limit))
-    return result.scalars().all()
+    return [document_to_response(d) for d in result.scalars().all()]
 
 
 @router.get("/audit-log", response_model=list[AuditLogResponse])

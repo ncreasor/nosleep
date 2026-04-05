@@ -10,6 +10,7 @@ from qdrant_client.models import PointStruct
 import numpy as np
 
 from config import settings
+from llm_json import parse_llm_json
 
 logger = logging.getLogger(__name__)
 openai_client = OpenAI(api_key=settings.openai_api_key)
@@ -53,10 +54,7 @@ class QueryExpansion:
                 messages=[{"role": "user", "content": prompt}],
             )
             content = response.content[0].text
-            # Parse JSON array
-            import json
-
-            variants = json.loads(content)
+            variants = parse_llm_json(content)
             return [query] + variants[:num_variants]
         except Exception as e:
             logger.error(f"Query expansion failed: {e}")

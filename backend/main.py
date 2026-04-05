@@ -5,13 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from database import init_db
 from config import settings
 from routers import documents, qdrant, ai, auth, chats, admin, folders, templates
-from seed_test_docs import seed_test_documents
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await seed_test_documents()
     yield
 
 

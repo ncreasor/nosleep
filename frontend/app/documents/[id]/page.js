@@ -7,10 +7,11 @@ import { useAuth } from '@/components/useAuth'
 import {
   ArrowLeft, Check, Loader2, Bold, Italic, Underline,
   List, ListOrdered, Heading1, Heading2, Minus, Redo, Undo,
-  ChevronRight, Trash2, X, BarChart2, GitBranch, Sparkles, AlertCircle,
 } from 'lucide-react'
+import { DocumentRightPanel } from './DocumentRightPanel'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
+
 
 function highlightArticlesInDom(container, articles) {
   if (!container || !articles || articles.length === 0) return
@@ -74,6 +75,7 @@ function SaveStatus({ status }) {
 function ToolbarBtn({ onClick, active, title, children }) {
   return (
     <button
+      type="button"
       onMouseDown={e => { e.preventDefault(); onClick() }}
       title={title}
       className={`p-1.5 rounded transition-colors ${active ? 'bg-gray-200 text-ink' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'}`}
@@ -98,21 +100,41 @@ export default function DocumentEditorPage() {
   const [analysis, setAnalysis] = useState(null)
   const [analysisLoading, setAnalysisLoading] = useState(false)
   const [articles, setArticles] = useState([])
+  const [normsMeta, setNormsMeta] = useState(null)
+  const [snapshotsFetchDone, setSnapshotsFetchDone] = useState(false)
+  const [initialSnapshot, setInitialSnapshot] = useState(null)
   const [articlesLoading, setArticlesLoading] = useState(false)
+  const [refChecks, setRefChecks] = useState([])
   const [selectedArticle, setSelectedArticle] = useState(null)
-  const [errors, setErrors] = useState([])
-  const [errorsSummary, setErrorsSummary] = useState('')
-  const [errorsLoading, setErrorsLoading] = useState(false)
-  const [dismissedErrors, setDismissedErrors] = useState(new Set())
-  const [askModal, setAskModal] = useState(null)
+  const [chronology, setChronology] = useState({ timeline: [], related: [], loading: false, error: null })
+  const [normRemedy, setNormRemedy] = useState({
+    loading: false,
+    summary: null,
+    edits: [],
+    skipped: [],
+    warnings: [],
+    error: null,
+    applyError: null,
+    applied: false,
+  })
+  const [aiChat, setAiChat] = useState({
+    chat_id: null,
+    messages: [],
+    loading: false,
+    sending: false,
+    error: null,
+  })
+  const [aiChatInput, setAiChatInput] = useState('')
+  const aiChatScrollRef = useRef(null)
+  const aiChatTextareaRef = useRef(null)
 
   const editorRef = useRef(null)
   const titleSaveTimeout = useRef(null)
   const contentSaveTimeout = useRef(null)
   const savedTitleRef = useRef('')
   const analyzedRef = useRef(false)
+  const persistSnapshotsTimerRef = useRef(null)
 
-  // Load document metadata and analysis
   useEffect(() => {
     if (authLoading) return
     fetch(`${BACKEND}/documents/${id}`, { headers: authHeaders })
@@ -126,45 +148,54 @@ export default function DocumentEditorPage() {
       })
       .finally(() => setLoading(false))
 
-    // Fetch analysis data
     setAnalysisLoading(true)
-    fetch(`${BACKEND}/documents/${id}/analysis`, { headers: authHeaders })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => setAnalysis(data))
-      .catch(() => {})
-      .finally(() => setAnalysisLoading(false))
-  }, [authLoading, id])
-
-  // Load document errors (lazy load when Formulation tab opened)
-  useEffect(() => {
-    if (activePanel !== 'formulation' || errors.length > 0 || errorsLoading) return
-    setErrorsLoading(true)
-    fetch(`${BACKEND}/documents/${id}/errors`, { headers: authHeaders })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (data) {
-          setErrorsSummary(data.summary || '')
-          setErrors(data.errors || [])
+    Promise.all([
+      fetch(`${BACKEND}/documents/${id}/snapshots`, { headers: authHeaders }).then(r =>
+        r.ok ? r.json() : {}
+      ),
+      fetch(`${BACKEND}/documents/${id}/analysis`, { headers: authHeaders }).then(r =>
+        r.ok ? r.json() : null
+      ),
+    ])
+      .then(([snap, freshAnalysis]) => {
+        if (snap?.analysis?.entity_analysis) {
+          setAnalysis(snap.analysis.entity_analysis)
+        } else if (freshAnalysis) {
+          setAnalysis(freshAnalysis)
         }
+        setInitialSnapshot(snap && typeof snap === 'object' ? snap : {})
       })
-      .catch(err => console.error('Failed to load errors:', err))
-      .finally(() => setErrorsLoading(false))
-  }, [activePanel, id, authHeaders])
+      .catch(() => setInitialSnapshot({}))
+      .finally(() => {
+        setSnapshotsFetchDone(true)
+        setAnalysisLoading(false)
+      })
+  }, [authLoading, id, authHeaders])
 
-  // Load content: localStorage first, then backend text endpoint for PDFs
   useEffect(() => {
-    if (loading || !editorRef.current || analyzedRef.current) return
+    if (loading || !snapshotsFetchDone || !editorRef.current || analyzedRef.current) return
+
+    const applyNormsFromSnapshot = () => {
+      const na = initialSnapshot?.analysis?.norms_analysis
+      if (na?.articles?.length) {
+        setArticles(na.articles)
+        setNormsMeta(na.meta ?? null)
+        if (Array.isArray(na.reference_checks)) setRefChecks(na.reference_checks)
+        highlightArticlesInDom(editorRef.current, na.articles)
+        analyzedRef.current = true
+        return true
+      }
+      return false
+    }
 
     const saved = localStorage.getItem(`doc-content-${id}`)
     if (saved) {
       editorRef.current.innerHTML = saved
       updateWordCount()
-      analyzedRef.current = true
-      analyzeDocument(editorRef.current.innerText)
+      applyNormsFromSnapshot()
       return
     }
 
-    // No local content — fetch from backend (PDF text extraction)
     fetch(`${BACKEND}/documents/${id}/text`, { headers: authHeaders })
       .then(res => res.ok ? res.json() : null)
       .then(data => {
@@ -177,15 +208,127 @@ export default function DocumentEditorPage() {
         editorRef.current.innerHTML = html
         localStorage.setItem(`doc-content-${id}`, html)
         updateWordCount()
-        analyzedRef.current = true
-        analyzeDocument(raw)
+        applyNormsFromSnapshot()
       })
       .catch(() => {})
-  }, [loading, id, authHeaders])
+  }, [loading, id, authHeaders, snapshotsFetchDone, initialSnapshot])
+
+  useEffect(() => {
+    setNormRemedy({
+      loading: false,
+      summary: null,
+      edits: [],
+      skipped: [],
+      warnings: [],
+      error: null,
+      applyError: null,
+      applied: false,
+    })
+    // Fetch chronology when an article is selected
+    if (!selectedArticle) {
+      setChronology({ timeline: [], related: [], loading: false, error: null })
+      return
+    }
+    const query = selectedArticle.title || selectedArticle.norm_text || ''
+    if (!query) return
+    setChronology(prev => ({ ...prev, loading: true, error: null }))
+    fetch(`${BACKEND}/ai/law-chronology`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({
+        query,
+        title: selectedArticle.title || '',
+        language: 'rus',
+        top_k: 15,
+      }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject('Failed'))
+      .then(data => setChronology({
+        timeline: Array.isArray(data.timeline) ? data.timeline : [],
+        related: Array.isArray(data.related) ? data.related : [],
+        loading: false,
+        error: null,
+      }))
+      .catch(err => {
+        console.error('Chronology fetch failed:', err)
+        setChronology({ timeline: [], related: [], loading: false, error: 'Не удалось загрузить хронологию' })
+      })
+  }, [selectedArticle, authHeaders])
+
+  const solveNormIssue = useCallback(async () => {
+    if (!selectedArticle) return
+    setNormRemedy((prev) => ({
+      ...prev,
+      loading: true,
+      summary: null,
+      edits: [],
+      skipped: [],
+      warnings: [],
+      error: null,
+      applyError: null,
+      applied: false,
+    }))
+    try {
+      const context = editorRef.current?.innerText?.substring(0, 12000) || ''
+      const res = await fetch(`${BACKEND}/ai/remediate-norm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({
+          status: selectedArticle.status,
+          norm_text: selectedArticle.norm_text,
+          title: selectedArticle.title,
+          law_url: selectedArticle.law_url,
+          law_chunk_preview: selectedArticle.law_chunk_preview,
+          usage_context: selectedArticle.usage_context,
+          applicability: selectedArticle.applicability,
+          current_status_explanation: selectedArticle.current_status_explanation,
+          document_context: context,
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setNormRemedy({
+          loading: false,
+          summary: data.summary || '',
+          edits: Array.isArray(data.edits) ? data.edits : [],
+          skipped: Array.isArray(data.skipped) ? data.skipped : [],
+          warnings: Array.isArray(data.warnings) ? data.warnings : [],
+          error: null,
+          applyError: null,
+          applied: false,
+        })
+      } else {
+        const errText = await res.text().catch(() => '')
+        setNormRemedy({
+          loading: false,
+          summary: null,
+          edits: [],
+          skipped: [],
+          warnings: [],
+          error: errText || 'Не удалось подготовить правки',
+          applyError: null,
+          applied: false,
+        })
+      }
+    } catch (e) {
+      console.error(e)
+      setNormRemedy({
+        loading: false,
+        summary: null,
+        edits: [],
+        skipped: [],
+        warnings: [],
+        error: 'Ошибка запроса',
+        applyError: null,
+        applied: false,
+      })
+    }
+  }, [selectedArticle, authHeaders])
 
   const analyzeDocument = async (text) => {
     if (!text || text.trim().length === 0) {
       setArticles([])
+      setNormsMeta(null)
       return
     }
 
@@ -199,20 +342,126 @@ export default function DocumentEditorPage() {
 
       if (!res.ok) throw new Error('Failed to analyze document')
 
-      const { articles: foundArticles } = await res.json()
-      setArticles(foundArticles || [])
+      const data = await res.json()
+      const meta = data.meta ?? null
+      const foundArticles = Array.isArray(data.articles) ? data.articles : []
+      const checks = Array.isArray(data.reference_checks) ? data.reference_checks : []
+      setNormsMeta(meta)
+      setArticles(foundArticles)
+      setRefChecks(checks)
+      analyzedRef.current = true
 
       // Highlight found articles in DOM
-      if (editorRef.current && foundArticles && foundArticles.length > 0) {
+      if (editorRef.current && foundArticles.length > 0) {
         highlightArticlesInDom(editorRef.current, foundArticles)
+      }
+
+      // Persist analysis results to database immediately
+      try {
+        const analysisPayload = {
+          entity_analysis: analysis,
+          norms_analysis: { meta, articles: foundArticles, reference_checks: checks },
+          saved_at: new Date().toISOString(),
+        }
+        await fetch(`${BACKEND}/documents/${id}/snapshots`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({ analysis: analysisPayload }),
+        })
+      } catch (saveErr) {
+        console.error('Failed to save analysis to DB:', saveErr)
       }
     } catch (error) {
       console.error('Document analysis error:', error)
       setArticles([])
+      setNormsMeta(null)
     } finally {
       setArticlesLoading(false)
     }
   }
+
+  const handleAnalyzeClick = useCallback(() => {
+    if (!editorRef.current) return
+    const text = editorRef.current.innerText
+    analyzeDocument(text)
+  }, [analysis, id, authHeaders])
+
+  const exportSnapshotsJson = useCallback(async () => {
+    let ai_chat = null
+    try {
+      const r = await fetch(`${BACKEND}/documents/${id}/ai-chat`, { headers: authHeaders })
+      if (r.ok) ai_chat = await r.json()
+    } catch {
+      /* ignore */
+    }
+    const payload = {
+      document_id: Number(id),
+      title: doc?.title ?? null,
+      exported_at: new Date().toISOString(),
+      analysis: {
+        entity_analysis: analysis,
+        norms_analysis: { meta: normsMeta, articles, reference_checks: refChecks },
+      },
+      changes: {
+        ai_chat,
+      },
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `document-${id}-analysis-changes.json`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }, [id, doc, analysis, normsMeta, articles, authHeaders])
+
+  useEffect(() => {
+    if (authLoading || !snapshotsFetchDone || !doc) return
+    if (persistSnapshotsTimerRef.current) clearTimeout(persistSnapshotsTimerRef.current)
+    persistSnapshotsTimerRef.current = setTimeout(async () => {
+      try {
+        let ai_chat = null
+        const ar = await fetch(`${BACKEND}/documents/${id}/ai-chat`, { headers: authHeaders })
+        if (ar.ok) ai_chat = await ar.json()
+        const analysisPayload = {
+          entity_analysis: analysis,
+          norms_analysis: { meta: normsMeta, articles, reference_checks: refChecks },
+          saved_at: new Date().toISOString(),
+        }
+        const changesPayload = {
+          ai_chat,
+          saved_at: new Date().toISOString(),
+        }
+        await fetch(`${BACKEND}/documents/${id}/snapshots`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({ analysis: analysisPayload, changes: changesPayload }),
+        })
+        try {
+          localStorage.setItem(
+            `doc-snapshots-${id}`,
+            JSON.stringify({ analysis: analysisPayload, changes: changesPayload })
+          )
+        } catch {
+          /* ignore quota */
+        }
+      } catch (e) {
+        console.error('Snapshot save failed', e)
+      }
+    }, 2000)
+    return () => {
+      if (persistSnapshotsTimerRef.current) clearTimeout(persistSnapshotsTimerRef.current)
+    }
+  }, [
+    analysis,
+    articles,
+    refChecks,
+    normsMeta,
+    id,
+    authHeaders,
+    snapshotsFetchDone,
+    authLoading,
+    doc,
+  ])
 
   // Cmd/Ctrl+S
   useEffect(() => {
@@ -238,6 +487,54 @@ export default function DocumentEditorPage() {
     const text = editorRef.current.innerText || ''
     setWordCount(text.trim().split(/\s+/).filter(Boolean).length)
   }
+
+  const applyNormEdits = useCallback(() => {
+    const edits = normRemedy.edits
+    if (!editorRef.current || !edits?.length) return
+    const sorted = [...edits].sort((a, b) => b.find.length - a.find.length)
+    const appliedEdits = [...sorted]
+    let text = editorRef.current.innerText
+    for (const e of sorted) {
+      const idx = text.indexOf(e.find)
+      if (idx === -1) {
+        setNormRemedy((prev) => ({
+          ...prev,
+          applyError: `Фрагмент не найден в тексте: «${e.find.slice(0, 96)}${e.find.length > 96 ? '…' : ''}»`,
+        }))
+        return
+      }
+      text = text.slice(0, idx) + e.replace + text.slice(idx + e.find.length)
+    }
+    const html = text.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('')
+    editorRef.current.innerHTML = html
+    localStorage.setItem(`doc-content-${id}`, html)
+    setSaveStatus('unsaved')
+    setNormRemedy((prev) => ({
+      ...prev,
+      edits: [],
+      applied: true,
+      applyError: null,
+    }))
+    updateWordCount()
+    clearTimeout(contentSaveTimeout.current)
+    contentSaveTimeout.current = setTimeout(saveContent, 1500)
+
+    const normLabel = selectedArticle?.norm_text || ''
+    for (const e of appliedEdits) {
+      fetch(`${BACKEND}/documents/${id}/corrections`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({
+          error_id: null,
+          error_type: 'norm_remedy',
+          title: normLabel ? `Правка: ${normLabel.slice(0, 80)}` : 'Правка нормы',
+          original_text: e.find,
+          suggestion: e.replace,
+          reason: null,
+        }),
+      }).catch(() => {})
+    }
+  }, [normRemedy.edits, id, saveContent, authHeaders, selectedArticle])
 
   const updateActiveFormats = () => {
     setActiveFormats({
@@ -312,385 +609,127 @@ export default function DocumentEditorPage() {
     return '#D1D5DB'
   }
 
-  function RightPanel() {
-    // Tabs array with icons
-    const tabs = [
-      { id: 'analysis', label: 'ИИ Анализ', Icon: BarChart2 },
-      { id: 'chronology', label: 'Хронология', Icon: GitBranch },
-      { id: 'formulation', label: 'Формулировка', Icon: Sparkles }
-    ]
+  const loadAiChat = useCallback(async () => {
+    setAiChat(prev => ({ ...prev, loading: true, error: null }))
+    try {
+      const r = await fetch(`${BACKEND}/documents/${id}/ai-chat`, { headers: authHeaders })
+      if (!r.ok) throw new Error('fail')
+      const data = await r.json()
+      setAiChat(prev => ({
+        ...prev,
+        chat_id: data.chat_id,
+        messages: data.messages || [],
+        loading: false,
+      }))
+    } catch {
+      setAiChat(prev => ({ ...prev, loading: false, error: 'Не удалось загрузить чат' }))
+    }
+  }, [id, authHeaders])
 
-    const acceptFix = (error) => {
-      if (!editorRef.current || !error.original_text) return
-      const html = editorRef.current.innerHTML
-      const updated = html.replace(
-        error.original_text,
-        `<mark class="norm-fixed">${error.suggestion}</mark>`
-      )
-      if (updated !== html) {
-        editorRef.current.innerHTML = updated
-        localStorage.setItem(`doc-content-${id}`, updated)
-        setErrors(prev => prev.filter(e => e.id !== error.id))
+  useEffect(() => {
+    if (authLoading || activePanel !== 'ai_chat') return
+    loadAiChat()
+  }, [activePanel, authLoading, loadAiChat])
+
+  useEffect(() => {
+    if (activePanel !== 'ai_chat') return
+    const el = aiChatScrollRef.current
+    if (!el) return
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight
+    })
+  }, [aiChat.messages, activePanel])
+
+  const sendAiChatMessage = useCallback(async () => {
+    const text = aiChatInput.trim()
+    if (!text || aiChat.sending) return
+    const docPlain = editorRef.current?.innerText || ''
+    setAiChat(prev => ({ ...prev, sending: true, error: null }))
+    try {
+      const r = await fetch(`${BACKEND}/documents/${id}/ai-chat/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ message: text, document_plain_text: docPlain }),
+      })
+      if (!r.ok) {
+        let detail = 'Ошибка запроса'
+        try {
+          const err = await r.json()
+          if (err.detail) detail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail)
+        } catch { /* ignore */ }
+        throw new Error(detail)
+      }
+      const data = await r.json()
+      setAiChatInput('')
+      setAiChat(prev => ({
+        ...prev,
+        chat_id: data.chat_id,
+        messages: data.messages || [],
+        sending: false,
+      }))
+      requestAnimationFrame(() => {
+        aiChatTextareaRef.current?.focus({ preventScroll: true })
+      })
+    } catch (e) {
+      setAiChat(prev => ({
+        ...prev,
+        sending: false,
+        error: e.message || 'Ошибка',
+      }))
+    }
+  }, [aiChatInput, aiChat.sending, id, authHeaders])
+
+  const approveAiChat = useCallback(async (messageId) => {
+    const docPlain = editorRef.current?.innerText || ''
+    setAiChat(prev => ({ ...prev, error: null }))
+    try {
+      const r = await fetch(`${BACKEND}/documents/${id}/ai-chat/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ message_id: messageId, document_plain_text: docPlain }),
+      })
+      const data = await r.json()
+      if (!data.ok) {
+        setAiChat(prev => ({ ...prev, error: data.detail || 'Не удалось применить' }))
+        return
+      }
+      if (data.merged_plain && editorRef.current) {
+        const html = data.merged_plain
+          .split(/\n{2,}/)
+          .map((p) => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+          .join('')
+        const ed = editorRef.current
+        const scrollEl = ed.closest('.overflow-y-auto')
+        const editorScrollTop = scrollEl?.scrollTop ?? 0
+        const winY = window.scrollY
+        ed.innerHTML = html
+        localStorage.setItem(`doc-content-${id}`, html)
+        updateWordCount()
         setSaveStatus('unsaved')
-      }
-    }
-
-    const askAboutError = async (error) => {
-      setAskModal({ error, loading: true, explanation: null })
-      try {
-        const context = editorRef.current?.textContent.substring(0, 2000) || ''
-        const res = await fetch(`${BACKEND}/ai/explain-error`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders },
-          body: JSON.stringify({
-            error_title: error.title,
-            original_text: error.original_text,
-            suggestion: error.suggestion,
-            reason: error.reason,
-            document_context: context
-          })
+        requestAnimationFrame(() => {
+          window.scrollTo(window.scrollX, winY)
+          if (scrollEl) scrollEl.scrollTop = editorScrollTop
+          aiChatTextareaRef.current?.focus({ preventScroll: true })
         })
-        if (res.ok) {
-          const data = await res.json()
-          setAskModal({ error, loading: false, explanation: data.explanation })
-        } else {
-          setAskModal({ error, loading: false, explanation: 'Не удалось получить объяснение' })
-        }
-      } catch (err) {
-        console.error('Error asking about error:', err)
-        setAskModal({ error, loading: false, explanation: 'Ошибка запроса' })
       }
+      await loadAiChat()
+    } catch (e) {
+      setAiChat(prev => ({ ...prev, error: e.message || 'Ошибка' }))
     }
+  }, [id, authHeaders, loadAiChat])
 
-    const dismissError = (id) => {
-      setDismissedErrors(prev => new Set([...prev, id]))
-    }
+  const rejectAiChat = useCallback(async (messageId) => {
+    try {
+      const r = await fetch(`${BACKEND}/documents/${id}/ai-chat/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ message_id: messageId }),
+      })
+      if (!r.ok) return
+      await loadAiChat()
+    } catch { /* ignore */ }
+  }, [id, authHeaders, loadAiChat])
 
-    const visibleErrors = errors.filter(e => !dismissedErrors.has(e.id))
-
-    return (
-      <div className="w-80 bg-white border-l border-gray-200 flex flex-col overflow-hidden">
-        {/* Tab bar with grid layout */}
-        <div className="grid grid-cols-3 gap-2 p-3 border-b border-gray-100 bg-white">
-          {tabs.map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setActivePanel(tab.id)}
-              className={`flex flex-col items-center gap-1 py-3 px-2 rounded-xl border-2 transition-all ${
-                activePanel === tab.id
-                  ? 'bg-[#ADFF5E] border-[#ADFF5E]'
-                  : 'bg-white border-gray-200 hover:border-gray-300'
-              }`}
-            >
-              <tab.Icon size={16} className={activePanel === tab.id ? 'text-gray-900' : 'text-gray-600'} />
-              <span className={`text-xs font-semibold ${activePanel === tab.id ? 'text-gray-900' : 'text-gray-600'}`}>
-                {tab.label}
-              </span>
-            </button>
-          ))}
-        </div>
-
-        {/* Content area */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {/* Analysis Tab - List of articles */}
-          {activePanel === 'analysis' && (
-            <div className="space-y-4">
-              <p className="text-xs font-semibold text-gray-700 uppercase">Статьи документа</p>
-
-              {articlesLoading ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 size={16} className="animate-spin text-gray-300" />
-                </div>
-              ) : articles.length === 0 ? (
-                <p className="text-xs text-gray-400 text-center py-8">Нормативные ссылки не найдены</p>
-              ) : (
-                <div className="space-y-3">
-                  {articles.map((article, idx) => (
-                    <div
-                      key={idx}
-                      onClick={() => {
-                        setSelectedArticle(article)
-                        setActivePanel('chronology')
-                      }}
-                      className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer hover:shadow-sm transition-all ${
-                        article.status === 'valid'
-                          ? 'bg-green-50 border-green-200'
-                          : article.status === 'outdated'
-                          ? 'bg-gray-50 border-gray-200'
-                          : 'bg-red-50 border-red-200'
-                      }`}
-                    >
-                      <div
-                        className="w-3 h-3 rounded-full mt-1 flex-shrink-0"
-                        style={{
-                          backgroundColor:
-                            article.status === 'valid'
-                              ? '#10B981'
-                              : article.status === 'outdated'
-                              ? '#9CA3AF'
-                              : '#EF4444'
-                        }}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900">{article.norm_text}</p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          {article.status === 'valid'
-                            ? 'Действует'
-                            : article.status === 'outdated'
-                            ? 'Устарела'
-                            : 'Не существует'}
-                        </p>
-                        {article.applicability && (
-                          <p className="text-xs text-gray-600 mt-1.5 leading-relaxed">{article.applicability}</p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Chronology Tab */}
-          {activePanel === 'chronology' && (
-            <div className="space-y-4">
-              {!selectedArticle ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-                    <GitBranch size={18} className="text-gray-400" />
-                  </div>
-                  <p className="text-xs text-gray-500 font-medium">Кликните на норму</p>
-                  <p className="text-xs text-gray-400 mt-1">в списке или в документе</p>
-                </div>
-              ) : selectedArticle ? (
-                <>
-                  {/* Status badge */}
-                  <div className="flex items-center gap-2">
-                    {(() => {
-                      const s = selectedArticle.status
-                      const m = { valid: 'ДЕЙСТВУЕТ', outdated: 'УСТАРЕЛА', invalid: 'НЕ СУЩЕСТВУЕТ' }
-                      const c = {
-                        valid: 'bg-green-100 text-green-800',
-                        outdated: 'bg-gray-100 text-gray-800',
-                        invalid: 'bg-red-100 text-red-800'
-                      }
-                      return (
-                        <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${c[s] || c.valid}`}>
-                          {m[s] || s}
-                        </span>
-                      )
-                    })()}
-                  </div>
-
-                  {/* Article title and reference */}
-                  <div>
-                    <p className="text-sm font-semibold text-gray-900">{selectedArticle.title || selectedArticle.norm_text}</p>
-                    {selectedArticle.title && (
-                      <p className="text-xs text-gray-400 mt-0.5">{selectedArticle.norm_text}</p>
-                    )}
-                  </div>
-
-                  {/* Applicability */}
-                  {selectedArticle.applicability && (
-                    <div className="p-3 bg-blue-50 rounded-xl border border-blue-100">
-                      <p className="text-xs font-medium text-blue-900 mb-1">Применимость:</p>
-                      <p className="text-xs text-blue-800 leading-relaxed">{selectedArticle.applicability}</p>
-                    </div>
-                  )}
-
-                  {/* Usage context */}
-                  {selectedArticle.usage_context && (
-                    <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
-                      <p className="text-xs font-medium text-amber-900 mb-1">Контекст использования:</p>
-                      <p className="text-xs text-amber-800 leading-relaxed">{selectedArticle.usage_context}</p>
-                    </div>
-                  )}
-
-                  {/* Timeline */}
-                  {(() => {
-                    const entries = []
-                    if (selectedArticle.introduced) {
-                      entries.push({
-                        date: selectedArticle.introduced,
-                        label: 'Введена',
-                        type: 'introduced'
-                      })
-                    }
-                    if (selectedArticle.amendments && Array.isArray(selectedArticle.amendments)) {
-                      selectedArticle.amendments.forEach(a => {
-                        entries.push({ date: a.date, label: a.description, type: 'amendment' })
-                      })
-                    }
-                    entries.sort((a, b) => a.date.localeCompare(b.date))
-
-                    if (entries.length === 0 && !selectedArticle.replaced_by && !selectedArticle.deleted_at) return null
-
-                    const isValid = selectedArticle.status === 'valid'
-                    const isOutdated = selectedArticle.status === 'outdated'
-                    const isInvalid = selectedArticle.status === 'invalid'
-
-                    return (
-                      <div className="border-t border-gray-100 pt-4">
-                        <p className="text-xs font-medium text-gray-500 mb-3 uppercase">История изменений</p>
-
-                        {selectedArticle.deleted_at && (
-                          <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200">
-                            <p className="text-xs font-medium text-red-900">Удалена {selectedArticle.deleted_at}</p>
-                          </div>
-                        )}
-
-                        {isOutdated && selectedArticle.replaced_by && (
-                          <div className="mb-4 p-3 rounded-xl bg-gray-50 border border-gray-200">
-                            <p className="text-xs font-medium text-gray-900">
-                              Заменена {selectedArticle.status_since || ''}:
-                            </p>
-                            <p className="text-xs text-gray-600 mt-1">{selectedArticle.replaced_by}</p>
-                          </div>
-                        )}
-
-                        {entries.length > 0 && (
-                          <div className="relative pl-8">
-                            <div
-                              className="absolute left-3 top-0 bottom-0 w-0.5"
-                              style={{
-                                background:
-                                  isValid ? '#ADFF5E' :
-                                  isOutdated ? 'transparent' :
-                                  'transparent',
-                                borderLeft:
-                                  isOutdated ? '2px dashed #9CA3AF' :
-                                  isInvalid ? '2px dashed #EF4444' :
-                                  'none'
-                              }}
-                            />
-
-                            <div className="space-y-3">
-                              {entries.map((entry, idx) => (
-                                <div key={idx} className="relative">
-                                  <div className="flex gap-3">
-                                    <div className="text-xs text-gray-400 w-16 flex-shrink-0 pt-0.5">
-                                      {new Date(entry.date).toLocaleDateString('ru-RU', {
-                                        day: 'numeric',
-                                        month: '2-digit',
-                                        year: '2-digit'
-                                      })}
-                                    </div>
-                                    <div className="flex-1 p-3 rounded-xl border border-gray-200 bg-white">
-                                      <p className="text-xs font-medium text-gray-900">{entry.label}</p>
-                                    </div>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })()}
-
-                  {/* Current status explanation */}
-                  {selectedArticle.current_status_explanation && (
-                    <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
-                      <p className="text-xs text-gray-700 leading-relaxed">
-                        {selectedArticle.current_status_explanation}
-                      </p>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <p className="text-xs text-gray-400 text-center py-4">Статья не найдена</p>
-              )}
-            </div>
-          )}
-
-          {/* Formulation Tab */}
-          {activePanel === 'formulation' && (
-            <div className="space-y-4">
-              {selectedArticle && (
-                <div>
-                  <p className="text-xs font-semibold text-gray-700 mb-3">Статья: {selectedArticle.title || selectedArticle.norm_text}</p>
-
-                  {selectedArticle.applicability && (
-                    <div className="p-2 mb-3 rounded-lg bg-blue-50 border border-blue-100">
-                      <p className="text-xs text-blue-800">{selectedArticle.applicability}</p>
-                    </div>
-                  )}
-
-                  {selectedArticle.usage_context && (
-                    <div className="p-2 mb-4 rounded-lg bg-amber-50 border border-amber-100">
-                      <p className="text-xs text-amber-800">{selectedArticle.usage_context}</p>
-                    </div>
-                  )}
-
-                  <div className="border-b border-gray-100 pb-4 mb-4" />
-                </div>
-              )}
-
-              {/* Document-level errors */}
-              {errorsLoading ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 size={16} className="animate-spin text-gray-300" />
-                </div>
-              ) : visibleErrors.length > 0 ? (
-                <>
-                  <p className="text-xs font-semibold text-gray-700 mb-3">Ошибки документа</p>
-                  <p className="text-sm text-gray-600 mb-4">{errorsSummary || 'Найдены ошибки в документе:'}</p>
-                  <div className="space-y-3">
-                    {visibleErrors.map((error, idx) => (
-                      <div key={error.id || idx} className="border border-gray-200 rounded-xl overflow-hidden">
-                        <div className="flex items-start gap-3 p-4">
-                          <AlertCircle size={16} className="text-red-500 mt-0.5 flex-shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-semibold text-gray-900">{error.title}</p>
-                            <p className="text-xs text-gray-600 mt-1 line-clamp-2">"{error.suggestion}"</p>
-                            {error.reason && (
-                              <p className="text-xs text-gray-500 mt-1.5 italic">{error.reason}</p>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Action buttons */}
-                        <div className="flex gap-2 px-4 pb-3 border-t border-gray-100">
-                          <button
-                            onClick={() => acceptFix(error)}
-                            className="flex-1 flex items-center justify-center gap-1 px-3 py-2 text-xs font-semibold text-gray-900 bg-[#ADFF5E] rounded-lg hover:bg-[#9AE84F] transition-colors"
-                          >
-                            <Check size={12} /> Принять
-                          </button>
-                          <button
-                            onClick={() => askAboutError(error)}
-                            className="flex-1 flex items-center justify-center gap-1 px-3 py-2 text-xs font-semibold text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-                          >
-                            Спросить
-                          </button>
-                          <button
-                            onClick={() => dismissError(error.id)}
-                            className="px-3 py-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                          >
-                            <X size={14} />
-                          </button>
-                        </div>
-
-                        {/* AI Explanation */}
-                        {askModal?.error?.id === error.id && askModal.explanation && (
-                          <div className="p-4 bg-blue-50 border-t border-gray-100">
-                            <p className="text-xs font-medium text-blue-900 mb-2">Объяснение:</p>
-                            <p className="text-xs text-blue-800 leading-relaxed">{askModal.explanation}</p>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <p className="text-xs text-gray-400 text-center py-8">Ошибки не найдены</p>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-    )
-  }
 
   if (authLoading || loading) {
     return (
@@ -714,6 +753,7 @@ export default function DocumentEditorPage() {
           {/* Top bar */}
           <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
             <button
+              type="button"
               onClick={() => router.push('/documents')}
               className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-700 transition-colors"
             >
@@ -727,6 +767,7 @@ export default function DocumentEditorPage() {
                 <span className="bg-gray-100 text-gray-500 text-xs px-2.5 py-0.5 rounded-full">{doc.status}</span>
               )}
               <button
+                type="button"
                 onMouseDown={e => e.preventDefault()}
                 onClick={saveContent}
                 className="bg-brand hover:bg-brand-hover transition-colors text-ink font-semibold text-xs px-3 py-1.5 rounded-full flex items-center gap-1.5"
@@ -820,7 +861,30 @@ export default function DocumentEditorPage() {
 
           </div>
 
-          <RightPanel />
+          <DocumentRightPanel
+            activePanel={activePanel}
+            setActivePanel={setActivePanel}
+            exportSnapshotsJson={exportSnapshotsJson}
+            normsMeta={normsMeta}
+            handleAnalyzeClick={handleAnalyzeClick}
+            articlesLoading={articlesLoading}
+            articles={articles}
+            refChecks={refChecks}
+            setSelectedArticle={setSelectedArticle}
+            selectedArticle={selectedArticle}
+            normRemedy={normRemedy}
+            solveNormIssue={solveNormIssue}
+            applyNormEdits={applyNormEdits}
+            chronology={chronology}
+            aiChat={aiChat}
+            aiChatInput={aiChatInput}
+            setAiChatInput={setAiChatInput}
+            aiChatScrollRef={aiChatScrollRef}
+            aiChatTextareaRef={aiChatTextareaRef}
+            sendAiChatMessage={sendAiChatMessage}
+            approveAiChat={approveAiChat}
+            rejectAiChat={rejectAiChat}
+          />
         </div>
       </main>
     </div>

@@ -7,6 +7,7 @@ from openai import OpenAI
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 import json
 import logging
+import anthropic
 from config import settings
 from database import get_db
 from models import Chat, ChatMessage, Document
@@ -14,12 +15,17 @@ from auth import get_current_user
 from processing import generate_embedding, get_qdrant_client, ensure_collection
 from advanced_rag import AdvancedRAG
 from multi_model import MultiModelEnsemble
+from laws_rag import LawsRAG
+from llm_json import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
-client = OpenAI(api_key=settings.openai_api_key)
+# OpenAI client for embeddings only
+openai_client = OpenAI(api_key=settings.openai_api_key)
+# Anthropic Claude for LLM calls
+claude_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 
 class ChatRequest(BaseModel):
@@ -61,8 +67,13 @@ class AdvancedDocumentChatRequest(BaseModel):
 @router.get("/ping")
 async def ai_ping():
     try:
-        response = client.models.retrieve(settings.openai_model)
-        return {"status": "ok", "model": response.id}
+        # Test Claude client
+        response = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=10,
+            messages=[{"role": "user", "content": "ping"}]
+        )
+        return {"status": "ok", "model": "claude-haiku-4-5-20251001"}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -71,25 +82,28 @@ async def ai_ping():
 async def chat(request: ChatRequest):
     try:
         kwargs = {
-            "model": settings.openai_model,
-            "messages": [{"role": "system", "content": request.system}] + request.messages,
+            "model": "claude-haiku-4-5-20251001",
+            "messages": request.messages,
             "temperature": request.temperature,
             "top_p": request.top_p,
-            "frequency_penalty": request.frequency_penalty,
-            "presence_penalty": request.presence_penalty,
         }
         if request.max_tokens:
             kwargs["max_tokens"] = request.max_tokens
+        else:
+            kwargs["max_tokens"] = 2048
 
-        response = client.chat.completions.create(**kwargs)
+        response = claude_client.messages.create(
+            system=request.system,
+            **kwargs
+        )
         return {
             "role": "assistant",
-            "content": response.choices[0].message.content,
+            "content": response.content[0].text,
             "model": response.model,
             "usage": {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": response.usage.input_tokens,
+                "completion_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
             },
         }
     except Exception as e:
@@ -101,21 +115,22 @@ async def chat_stream(request: ChatStreamRequest):
     async def generate():
         try:
             kwargs = {
-                "model": settings.openai_model,
-                "messages": [{"role": "system", "content": request.system}] + request.messages,
+                "model": "claude-haiku-4-5-20251001",
+                "messages": request.messages,
                 "temperature": request.temperature,
                 "top_p": request.top_p,
-                "frequency_penalty": request.frequency_penalty,
-                "presence_penalty": request.presence_penalty,
-                "stream": True,
             }
             if request.max_tokens:
                 kwargs["max_tokens"] = request.max_tokens
+            else:
+                kwargs["max_tokens"] = 2048
 
-            stream = client.chat.completions.create(**kwargs)
-            for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    yield f"data: {chunk.choices[0].delta.content}\n\n"
+            with claude_client.messages.stream(
+                system=request.system,
+                **kwargs
+            ) as stream:
+                for text in stream.text_stream:
+                    yield f"data: {text}\n\n"
         except Exception as e:
             yield f"data: ERROR: {str(e)}\n\n"
 
@@ -125,7 +140,7 @@ async def chat_stream(request: ChatStreamRequest):
 @router.post("/embed")
 async def embed(request: EmbedRequest):
     try:
-        response = client.embeddings.create(
+        response = openai_client.embeddings.create(
             model=settings.openai_embed_model,
             input=request.text,
         )
@@ -190,13 +205,15 @@ async def document_chat(
         ]
         messages.append({"role": "user", "content": request.message})
 
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[{"role": "system", "content": system_prompt}] + messages,
+        response = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            messages=messages,
+            system=system_prompt,
             temperature=0.7,
+            max_tokens=2048,
         )
 
-        assistant_response = response.choices[0].message.content
+        assistant_response = response.content[0].text
 
         user_msg = ChatMessage(chat_id=request.chat_id, role="user", content=request.message)
         db.add(user_msg)
@@ -211,9 +228,9 @@ async def document_chat(
             "content": assistant_response,
             "model": response.model,
             "usage": {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": response.usage.input_tokens,
+                "completion_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
             },
         }
     except Exception as e:
@@ -306,13 +323,15 @@ Use the retrieved context to answer the user's question accurately. If the conte
         messages.append({"role": "user", "content": request.message})
 
         # Get LLM response with RAG context
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[{"role": "system", "content": system_prompt}] + messages,
+        response = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            messages=messages,
+            system=system_prompt,
             temperature=0.7,
+            max_tokens=2048,
         )
 
-        assistant_response = response.choices[0].message.content
+        assistant_response = response.content[0].text
 
         # Save messages to history
         user_msg = ChatMessage(chat_id=request.chat_id, role="user", content=request.message)
@@ -333,9 +352,9 @@ Use the retrieved context to answer the user's question accurately. If the conte
                 "query_variants": rag_result.query_variants,
             },
             "usage": {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": response.usage.input_tokens,
+                "completion_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
             },
         }
     except HTTPException:
@@ -455,20 +474,18 @@ async def websocket_chat(websocket: WebSocket, chat_id: int):
                 })
 
                 full_response = ""
-                stream = client.chat.completions.create(
-                    model=settings.openai_model,
-                    messages=[{"role": "system", "content": system_prompt}] + messages,
+                with claude_client.messages.stream(
+                    model="claude-haiku-4-5-20251001",
+                    messages=messages,
+                    system=system_prompt,
                     temperature=0.7,
-                    stream=True,
-                )
-
-                for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        token = chunk.choices[0].delta.content
-                        full_response += token
+                    max_tokens=2048,
+                ) as stream:
+                    for text in stream.text_stream:
+                        full_response += text
                         await websocket.send_json({
                             "type": "token",
-                            "content": token
+                            "content": text
                         })
 
                 # Send completion
@@ -522,51 +539,194 @@ class ExplainErrorRequest(BaseModel):
 
 @router.post("/explain-error")
 async def explain_error(request: ExplainErrorRequest):
-    """Get detailed explanation of why a text is an error and how to fix it."""
+    """Get detailed explanation of why a text is an error — grounded in RAG evidence."""
     try:
-        prompt = f"""You are a legal expert in Kazakh law. A user has found an error in a legal document.
+        from laws_rag import LawsRAG
 
-Error title: {request.error_title}
-Original text (incorrect): "{request.original_text}"
-Suggested correction: "{request.suggestion}"
-Reason: {request.reason}
+        # Search for relevant law text to ground the explanation
+        rag = LawsRAG()
+        search_query = f"{request.error_title} {request.original_text}"[:200]
+        rag_context = ""
+        try:
+            rag_results = await rag.search(
+                query=search_query, language="rus", top_k=3, use_reranking=False,
+            )
+            for r in rag_results:
+                rag_context += f"--- {r['title']} ({r.get('number', '')}) ---\n"
+                rag_context += f"Статус: {'действует' if r.get('is_active') else 'утратил силу'}\n"
+                rag_context += f"{r['text'][:500]}\n\n"
+        except Exception as rag_err:
+            logger.warning("RAG search for explain-error failed: %s", rag_err)
 
-Document context (first part): {request.document_context[:1000]}
+        prompt = f"""Ты юридический эксперт по праву РК. Пользователь нашёл ошибку в юридическом документе.
 
-Please provide:
-1. A detailed explanation (2-3 sentences) of why the original text is wrong in the context of Kazakh law
-2. A concrete example of how this error might affect the document
-3. Any relevant legal references or rules that apply
+Название ошибки: {request.error_title}
+Оригинальный текст (некорректный): "{request.original_text}"
+Предложенная правка: "{request.suggestion}"
+Причина: {request.reason}
 
-Respond in Russian. Be concise and professional."""
+Контекст документа: {request.document_context[:1000]}
 
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert in Kazakh law and legal document analysis. Provide clear, professional explanations."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.5,
+ФРАГМЕНТЫ ИЗ БАЗЫ ЗАКОНОДАТЕЛЬСТВА:
+{rag_context if rag_context else "Релевантные нормы не найдены в базе."}
+
+Объясни:
+1. Почему оригинальный текст ошибочен (2-3 предложения) — ссылайся ТОЛЬКО на фрагменты из базы выше.
+2. Конкретный пример того, как ошибка может повлиять на документ.
+3. Ссылки на нормы — ТОЛЬКО те, что есть во фрагментах выше. Не выдумывай ссылки.
+
+Если во фрагментах из базы нет подтверждения ошибки, честно укажи: "Не удалось подтвердить ошибку по базе законодательства."
+
+Отвечай на русском. Кратко и профессионально."""
+
+        response = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            messages=[{"role": "user", "content": prompt}],
+            system="Ты эксперт по праву РК. Объясняешь ошибки ТОЛЬКО на основании предоставленных фрагментов из базы. Не выдумывай ссылки на нормы.",
+            temperature=0.3,
             max_tokens=600,
         )
 
-        explanation = response.choices[0].message.content.strip()
+        explanation = response.content[0].text.strip()
 
         return {
             "explanation": explanation,
             "error_title": request.error_title,
             "original_text": request.original_text,
-            "suggestion": request.suggestion
+            "suggestion": request.suggestion,
+            "grounded": bool(rag_context.strip()),
         }
 
     except Exception as e:
         logger.error(f"Error explaining error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class NormRemedyRequest(BaseModel):
+    status: str
+    norm_text: str = ""
+    title: str = ""
+    law_url: str | None = None
+    law_chunk_preview: str | None = None
+    usage_context: str = ""
+    applicability: str = ""
+    current_status_explanation: str = ""
+    document_context: str = ""
+
+
+@router.post("/remediate-norm")
+async def remediate_norm(request: NormRemedyRequest):
+    """
+    Agent: produce concrete find/replace edits for plain document text, validated against the document.
+    """
+    try:
+        doc = (request.document_context or "").strip()
+        if not doc:
+            return {
+                "summary": "Нет текста документа для правки.",
+                "edits": [],
+                "skipped": [],
+                "warnings": ["Пустой документ"],
+            }
+
+        doc = doc[:12000]
+        kind = "устарела или заменена" if request.status == "outdated" else "недействительна или не применима"
+        prompt = f"""Ты юридический агент по праву Республики Казахстан. Нужно исправить текст документа: убрать ссылки на норму, которая {kind}, и заменить формулировки на актуальные (по общим правилам ссылок на ТК/ГК РК и adilet.zan.kz).
+
+Факты о проблемной норме:
+- Статус: {request.status}
+- Обозначение: {request.norm_text}
+- Заголовок акта: {request.title}
+- Ссылка adilet: {request.law_url or "нет"}
+- Фрагмент из базы: {(request.law_chunk_preview or "")[:900]}
+- Контекст в документе (откуда сопоставление): {(request.usage_context or "")[:900]}
+- Пояснение статуса: {(request.current_status_explanation or "")[:600]}
+
+ПОЛНЫЙ ТЕКСТ ДОКУМЕНТА (plain text, как есть, посимвольно важен перенос строк):
+---
+{doc}
+---
+
+Задача: верни ТОЛЬКО валидный JSON без markdown:
+{{
+  "summary": "одно короткое предложение что меняем и зачем",
+  "edits": [
+    {{
+      "find": "подстрока из документа ВЫШЕ — скопируй буквально, без перефразирования",
+      "replace": "на что заменить (можно пустая строка если удалить)",
+      "reason": "кратко почему эта замена"
+    }}
+  ]
+}}
+
+Правила:
+1. Каждое поле "find" ДОЛЖНО быть точной непрерывной подстрокой текста между --- (включая пробелы и переносы строк как в документе).
+2. Не выдумывай цитаты — если точного фрагмента нет в документе, не добавляй такой edit.
+3. Минимум правок, максимум пользы: ссылки на статьи, устаревшие номера законов, явные отсылки к отменённым актам.
+4. Если в документе нет правимого текста по этой норме — верни "edits": [] и в summary объясни.
+5. Порядок edits: сначала более длинные find (если несколько), чтобы не ломать вложенные замены; не пересекай find друг с другом."""
+
+        response = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            messages=[{"role": "user", "content": prompt}],
+            system="Ты возвращаешь только JSON с правками текста. Не добавляй текст вне JSON.",
+            temperature=0.2,
+            max_tokens=4096,
+        )
+
+        raw = response.content[0].text.strip()
+        try:
+            data = parse_llm_json(raw)
+        except json.JSONDecodeError:
+            logger.error("remediate_norm JSON parse failed: %s", raw[:500])
+            raise HTTPException(status_code=502, detail="Модель вернула невалидный JSON")
+
+        summary = (data.get("summary") or "").strip() or "Правки подготовлены."
+        raw_edits = data.get("edits") if isinstance(data.get("edits"), list) else []
+
+        validated: list[dict] = []
+        skipped: list[dict] = []
+        for i, ed in enumerate(raw_edits):
+            if not isinstance(ed, dict):
+                continue
+            find = ed.get("find")
+            replace = ed.get("replace")
+            if find is None or replace is None:
+                skipped.append({"index": i, "reason": "нет find или replace"})
+                continue
+            find = str(find)
+            replace = str(replace)
+            if not find:
+                skipped.append({"index": i, "reason": "пустой find"})
+                continue
+            if find not in doc:
+                skipped.append({"index": i, "reason": "find не найден в документе", "find": find[:80]})
+                continue
+            validated.append(
+                {
+                    "find": find,
+                    "replace": replace,
+                    "reason": (ed.get("reason") or "").strip(),
+                }
+            )
+
+        validated.sort(key=lambda x: len(x["find"]), reverse=True)
+
+        warnings: list[str] = []
+        if skipped:
+            warnings.append(f"Отброшено правок: {len(skipped)}")
+
+        return {
+            "summary": summary,
+            "edits": validated,
+            "skipped": skipped,
+            "warnings": warnings,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in remediate_norm: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -595,107 +755,189 @@ async def validate_articles_handler(request: ArticlesValidationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class LawChronologyRequest(BaseModel):
+    query: str
+    title: str = ""
+    sphere: str | None = None
+    language: str = "rus"
+    top_k: int = 15
+
+
+@router.post("/law-chronology")
+async def law_chronology(request: LawChronologyRequest):
+    """
+    Semantic search for related laws ordered by date from Qdrant payload.
+    Returns a grounded timeline of related legislation.
+    """
+    try:
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from zeroentropy import ZeroEntropy
+
+        ze = ZeroEntropy(api_key=settings.zeroentropy_api_key)
+        qdrant = QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_service_api_key or None,
+            timeout=30.0,
+        )
+
+        # Embed query
+        embed_resp = ze.models.embed(
+            model="zembed-1",
+            input=[request.query[:500]],
+            input_type="document",
+            dimensions=1280,
+            encoding_format="float",
+        )
+        vector = embed_resp.results[0].embedding[:1280]
+
+        # Build filter
+        conditions = []
+        if request.language:
+            conditions.append(FieldCondition(key="language", match=MatchValue(value=request.language)))
+        if request.sphere:
+            conditions.append(FieldCondition(key="sphere", match=MatchValue(value=request.sphere)))
+        flt = Filter(must=conditions) if conditions else None
+
+        results = qdrant.search(
+            collection_name=settings.qdrant_laws_collection,
+            query_vector=vector,
+            query_filter=flt,
+            limit=request.top_k,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        # Deduplicate by title+number and collect entries
+        seen: dict[str, dict] = {}
+        for hit in results:
+            p = hit.payload or {}
+            title = (p.get("title") or "").strip()
+            number = (p.get("number") or "").strip()
+            key = f"{title}|{number}"
+            if key in seen:
+                continue
+            date_raw = (p.get("date") or "").strip()
+            seen[key] = {
+                "title": title or "Норма РК",
+                "number": number,
+                "date": date_raw,
+                "status": p.get("status", ""),
+                "is_active": p.get("is_active", True),
+                "sphere": p.get("sphere", ""),
+                "text_preview": (p.get("text") or "")[:300].strip(),
+                "url": p.get("url", ""),
+                "relevance_score": round(float(hit.score), 4),
+                "point_id": str(hit.id),
+            }
+
+        entries = list(seen.values())
+
+        # Sort by date (entries with dates first, then by date ascending)
+        def sort_key(e):
+            d = e.get("date") or ""
+            return (0 if d else 1, d)
+
+        entries.sort(key=sort_key)
+
+        # Split into current law versions and related laws
+        # The first entry with highest relevance is likely the "main" match
+        main_title = request.title.lower().strip() if request.title else ""
+        timeline = []
+        related = []
+        for e in entries:
+            e_title = e["title"].lower()
+            # If the title contains a significant overlap with the query title, it's the same law
+            if main_title and (main_title in e_title or e_title in main_title):
+                timeline.append(e)
+            else:
+                related.append(e)
+
+        # If nothing matched as "timeline", just put everything in timeline
+        if not timeline:
+            timeline = entries
+            related = []
+
+        return {
+            "timeline": timeline,
+            "related": related,
+            "total": len(entries),
+        }
+
+    except Exception as e:
+        logger.error(f"Error in law chronology: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class AnalyzeDocumentRequest(BaseModel):
     document_text: str
+    language: str = "rus"
+    top_k_per_chunk: int = 5
+    max_results: int = 28
+    verify_facts: bool = True
 
 
 class CheckNormsRequest(BaseModel):
     norms: list[str]
 
 
+class LawsSearchRequest(BaseModel):
+    query: str
+    is_active: bool | None = None
+    sphere: str | None = None
+    language: str = "rus"
+    doc_kind: str | None = None
+    top_k: int = 5
+
+
+@router.post("/laws-search")
+async def laws_search(request: LawsSearchRequest):
+    """
+    Hybrid RAG search for Kazakhstan legal documents.
+    Uses dense vectors (ZeroEntropy zembed-1) + BM25 + ZeRank reranking.
+    Shows active/inactive status via payload indexes.
+    """
+    try:
+        rag = LawsRAG()
+        result = await rag.chat(
+            query=request.query,
+            is_active=request.is_active,
+            sphere=request.sphere,
+            language=request.language,
+            top_k=request.top_k,
+        )
+
+        return {
+            "answer": result["answer"],
+            "sources": result["results"],
+            "sources_count": result["sources_count"],
+            "model": "claude-haiku-4-5-20251001",
+        }
+    except Exception as e:
+        logger.error(f"Error in laws search: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/analyze-legal-norms")
 async def analyze_legal_norms(request: AnalyzeDocumentRequest):
     """
-    Analyze document and extract all legal norm references.
-    Uses GPT to intelligently identify Kazakhstan law articles and their context.
+    Embed document chunks (zembed-1), search Qdrant `zan_legal_docs`, optionally
+    verify each chunk against top-k candidates with Claude (grounding).
     """
     try:
         if not request.document_text or not isinstance(request.document_text, str):
             raise HTTPException(status_code=400, detail="document_text is required")
 
-        # Truncate to avoid excessive token usage
-        truncated = request.document_text[:4000]
+        from document_law_match import match_document_to_laws
 
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are a legal document analyzer specializing in Kazakhstan legislation.
-You understand Kazakh legal codes: ГК РК (Civil Code), ТК РК (Labor Code), УК РК (Criminal Code),
-УПК РК, ГПК РК (Civil Procedure Code), КоАП РК, НК РК (Tax Code), ЗК РК (Land Code), ЖК РК (Housing Code), СК РК (Family Code).
-
-Your task: Read the provided document text and find ALL references to Kazakhstan legal norms/articles.
-For each reference found, provide comprehensive analysis including:
-- When the norm was introduced
-- All significant amendments with dates
-- Whether it was replaced (and by what)
-- Whether it was deleted
-- Current legal status (valid/outdated/invalid)
-- How this norm applies to the given document (applicability)
-- Where and in what context it is mentioned in the document (usage_context)
-
-Return ONLY valid JSON, no markdown or explanation.""",
-                },
-                {
-                    "role": "user",
-                    "content": f"""CRITICAL: Extract ONLY legal norm references that are EXPLICITLY MENTIONED in the document text.
-Do NOT generate, invent, or hallucinate norms that are not in the text.
-Do NOT create fictional statutes like "статья 888" or "статья 777" if they don't appear in the document.
-
-Look for patterns like:
-- "ст. 293 ТК РК"
-- "статья 50 ТК РК"
-- "ст. 100 ГК РК"
-- "Закон РК от ..."
-
-Document text:
----
-{truncated}
----
-
-For EACH reference explicitly found in the document, provide:
-- norm_text: exact reference as written in document
-- title, status, applicability, usage_context, introduced, amendments, replaced_by, deleted_at, current_status_explanation
-
-IMPORTANT: If the reference text doesn't actually exist as a real norm in Kazakhstan legislation, mark status as "invalid".
-
-Return as JSON:
-{{
-  "articles": [
-    {{ "norm_text": "ст. 293 ТК РК", ... }}
-  ]
-}}
-
-If ZERO norms are explicitly mentioned in the document, return {{"articles": []}}.
-Do NOT invent any norms. Empty document = empty articles array.""",
-                },
-            ],
-            temperature=0.3,
-            max_tokens=3000,
+        result = await match_document_to_laws(
+            request.document_text,
+            language=request.language,
+            top_k_per_chunk=request.top_k_per_chunk,
+            max_results=request.max_results,
+            verify_facts=request.verify_facts,
         )
-
-        content = response.choices[0].message.content.strip()
-
-        try:
-            json_response = json.loads(content)
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse GPT response: {content}")
-            return {"articles": []}
-
-        # Validate response structure
-        if not json_response.get("articles") or not isinstance(json_response["articles"], list):
-            return {"articles": []}
-
-        # Load Kazakhstan laws database for validation
-        try:
-            from laws_validator import validate_articles as validate_articles_fn
-
-            validated = validate_articles_fn(json_response["articles"])
-            return {"articles": validated}
-        except Exception as e:
-            logger.warning(f"Could not validate against laws database: {e}")
-            return json_response
+        return result
 
     except HTTPException:
         raise
@@ -707,63 +949,117 @@ Do NOT invent any norms. Empty document = empty articles array.""",
 @router.post("/check-norms")
 async def check_norms(request: CheckNormsRequest):
     """
-    Check legal norm references for details, amendments, status, etc.
-    Returns comprehensive information for each norm including chronology and related laws.
+    Check legal norm references — grounded in local DB + Qdrant RAG.
+    Only returns facts that can be substantiated by retrieved evidence.
     """
     try:
         if not request.norms or not isinstance(request.norms, list):
             return {"results": {}}
 
-        norms_text = '\n'.join([f'{i + 1}. "{n}"' for i, n in enumerate(request.norms)])
+        from laws_validator import validate_norm
+        from laws_rag import LawsRAG
 
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are a legal reference system specializing in the legislation of the Republic of Kazakhstan (RK/РК).
-You have knowledge of Kazakh legal codes: ГК РК (Civil Code), ТК РК (Labor Code), УК РК (Criminal Code),
-УПК РК, ГПК РК (Civil Procedure Code), КоАП РК, НК РК (Tax Code), ЗК РК (Land Code), ЖК РК (Housing Code), СК РК (Family Code).
+        rag = LawsRAG()
+        results: dict[str, dict] = {}
 
-For each legal norm reference provided, return a JSON object with:
-- "status": one of "valid" (norm exists and is in force), "outdated" (norm exists but has been superseded or amended, or is from an old version), "invalid" (norm does not exist)
-- "title": the official name/title of the article or law, null if unknown
-- "introduced": ISO date string (YYYY-MM-DD) when the norm was first introduced, null if unknown
-- "amendments": array of { "date": "YYYY-MM-DD", "description": "brief description in Russian" }, max 5, empty if none
-- "current_status_explanation": 1-2 sentences in Russian explaining the current status
-- "status_since": ISO date string (YYYY-MM-DD) when norm acquired its current status, null if unknown
-- "replaced_by": string describing what replaced this norm (if status is "outdated"), null otherwise
-- "is_latest_amendment": boolean true if using latest version, false if using older version
-- "analysis": 2-3 sentence description in Russian of what this norm regulates, its scope, and who it applies to
-- "related_laws": array of max 3 objects { "title": "official name", "number": "code abbreviation", "relevance": "brief explanation" } of related laws in the same domain
-- "formulation_issues": array of max 3 objects { "type": "category", "description": "common mistake in Russian", "suggestion": "how to fix it" } - common errors when citing this norm in contracts/documents
+        for norm_ref in request.norms:
+            # Step 1: Check local law database (ground truth)
+            db_result = validate_norm(norm_ref)
 
-Respond ONLY with valid JSON. No markdown, no explanation outside JSON.""",
-                },
-                {
-                    "role": "user",
-                    "content": f"""Check the following legal norm references from Kazakh legislation. For each, return a comprehensive analysis including status, title, chronology, detailed explanation, related laws, and common formulation issues.
+            # Step 2: Search Qdrant for actual law text
+            rag_results = await rag.search(
+                query=norm_ref, language="rus", top_k=3, use_reranking=False,
+            )
+            rag_context = ""
+            rag_sources = []
+            for r in rag_results:
+                rag_context += f"--- {r['title']} ({r.get('number', '')}) ---\n"
+                rag_context += f"Статус: {'действует' if r.get('is_active') else 'утратил силу'}\n"
+                rag_context += f"Текст: {r['text'][:600]}\n\n"
+                rag_sources.append({
+                    "title": r.get("title", ""),
+                    "number": r.get("number", ""),
+                    "is_active": r.get("is_active", False),
+                    "url": r.get("url", ""),
+                })
 
-Norms to check:
-{norms_text}
+            # Step 3: Build result from DB facts first
+            entry: dict = {
+                "status": db_result.get("status", "invalid"),
+                "title": db_result.get("title"),
+                "introduced": db_result.get("introduced"),
+                "amendments": [],
+                "current_status_explanation": "",
+                "status_since": None,
+                "replaced_by": None,
+                "is_latest_amendment": None,
+                "analysis": "",
+                "related_laws": [],
+                "formulation_issues": [],
+                "grounded": db_result.get("valid", False),
+                "source": "database" if db_result.get("valid") else "not_found",
+                "rag_sources": rag_sources,
+            }
 
-Return as JSON object where each key is the norm reference text (exactly as provided):
-{{ "norm1": {{ status, title, introduced, amendments, current_status_explanation, status_since, replaced_by, is_latest_amendment, analysis, related_laws, formulation_issues }}, "norm2": {{...}} }}""",
-                },
-            ],
-            temperature=0.3,
-            max_tokens=2000,
-        )
+            if not db_result.get("valid"):
+                entry["current_status_explanation"] = db_result.get("reason") or "Норма не найдена в локальной базе данных."
 
-        content = response.choices[0].message.content.strip()
+            # Step 4: If we have RAG context, ask Claude to analyze ONLY from evidence
+            if rag_context.strip():
+                entry["source"] = "database+rag" if db_result.get("valid") else "rag_only"
+                try:
+                    response = claude_client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        messages=[{
+                            "role": "user",
+                            "content": f"""Проанализируй норму "{norm_ref}" ТОЛЬКО на основании приведённых ниже фрагментов из базы законодательства РК.
 
-        try:
-            json_response = json.loads(content)
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse norm check response: {content}")
-            return {"results": {}}
+Результат проверки по локальной базе:
+- Статус: {db_result.get('status', 'unknown')}
+- Название статьи: {db_result.get('title') or 'не найдено'}
+- Закон: {db_result.get('law_name') or 'не определён'}
 
-        return {"results": json_response}
+Фрагменты из базы Qdrant:
+{rag_context}
+
+ВАЖНО:
+- НЕ выдумывай поправки, даты или замены — если информации нет в фрагментах выше, пиши null.
+- Поле "analysis" — только то, что следует из текста фрагментов.
+- "amendments" — только если в тексте явно упомянуты изменения.
+- Если норма не найдена ни в базе, ни во фрагментах — status: "invalid".
+
+Верни ТОЛЬКО JSON:
+{{
+  "current_status_explanation": "1-2 предложения на основе фрагментов",
+  "analysis": "2-3 предложения о предмете регулирования на основе фрагментов, или пустая строка если нет данных",
+  "amendments": [],
+  "replaced_by": null,
+  "formulation_issues": []
+}}""",
+                        }],
+                        system="Ты юридический справочник РК. Отвечай ТОЛЬКО на основании предоставленных фрагментов. Не придумывай факты. Отвечай только валидным JSON.",
+                        temperature=0.1,
+                        max_tokens=800,
+                    )
+
+                    llm_data = parse_llm_json(response.content[0].text.strip())
+                    if isinstance(llm_data, dict):
+                        if llm_data.get("current_status_explanation"):
+                            entry["current_status_explanation"] = llm_data["current_status_explanation"]
+                        if llm_data.get("analysis"):
+                            entry["analysis"] = llm_data["analysis"]
+                        if isinstance(llm_data.get("amendments"), list):
+                            entry["amendments"] = llm_data["amendments"]
+                        if llm_data.get("replaced_by"):
+                            entry["replaced_by"] = llm_data["replaced_by"]
+                        if isinstance(llm_data.get("formulation_issues"), list):
+                            entry["formulation_issues"] = llm_data["formulation_issues"]
+                except Exception as llm_err:
+                    logger.warning("LLM enrichment for norm %s failed: %s", norm_ref, llm_err)
+
+            results[norm_ref] = entry
+
+        return {"results": results}
 
     except Exception as e:
         logger.error(f"Error checking norms: {e}")

@@ -5,14 +5,18 @@ class Settings(BaseSettings):
     qdrant_url: str
     qdrant_service_api_key: str = ""
     qdrant_collection: str = "legal_documents"
+    qdrant_laws_collection: str = "zan_legal_docs"
     openai_api_key: str
     openai_model: str = "gpt-4o-mini"
     openai_embed_model: str = "text-embedding-3-small"
+    anthropic_api_key: str
+    zeroentropy_api_key: str
     secret_key: str
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24 * 7
     cors_origins: list[str] = ["*"]
     max_file_size_mb: int = 20
+    law_grounding_max_concurrency: int = 6
 
     class Config:
         env_file = ".env"

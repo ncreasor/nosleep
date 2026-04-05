@@ -1,9 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import json
+import os
+import tempfile
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from database import get_db
 from models import Template, TemplateFolder
+from processing import extract_text
 from schemas import (
     TemplateFolderCreate,
     TemplateFolderUpdate,
@@ -119,6 +125,53 @@ async def delete_template_folder(
 # ============= Templates =============
 
 
+@router.post("/from-docx")
+@router.post("/from-word")
+async def template_extract_word(
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+):
+    """Extract plain text from .docx (python-docx) or .doc (antiword / catdoc / LibreOffice)."""
+
+    name_lower = (file.filename or "").lower()
+    if not (name_lower.endswith(".docx") or name_lower.endswith(".doc")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Поддерживаются только файлы .doc и .docx",
+        )
+    content = await file.read()
+    max_bytes = settings.max_file_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File too large. Max {settings.max_file_size_mb} MB",
+        )
+    suffix = ".docx" if name_lower.endswith(".docx") else ".doc"
+    mime = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if suffix == ".docx"
+        else "application/msword"
+    )
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    try:
+        with open(path, "wb") as f:
+            f.write(content)
+        try:
+            text = extract_text(path, mime)
+        except RuntimeError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e),
+            ) from e
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return {"text": text or "", "filename": file.filename}
+
+
 @router.post("", response_model=TemplateResponse, status_code=status.HTTP_201_CREATED)
 async def create_template(
     template_data: TemplateCreate,
@@ -206,8 +259,20 @@ async def update_template(
         template.name = template_data.name
     if template_data.description is not None:
         template.description = template_data.description
-    if template_data.content:
-        template.content = template_data.content
+    if template_data.content is not None:
+        try:
+            old = json.loads(template.content) if template.content else {}
+            new = json.loads(template_data.content)
+            if (
+                isinstance(old, dict)
+                and isinstance(new, dict)
+                and old.get("structured")
+                and "structured" not in new
+            ):
+                new["structured"] = old["structured"]
+            template.content = json.dumps(new, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            template.content = template_data.content
     if template_data.folder_id is not None:
         template.folder_id = template_data.folder_id
     if template_data.tags is not None:

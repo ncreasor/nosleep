@@ -63,6 +63,8 @@ class Document(Base):
     language = Column(String, nullable=True, default="kk")
     qdrant_id = Column(String, nullable=True, index=True)
     extracted_text = Column(Text, nullable=True)
+    saved_analysis_json = Column(Text, nullable=True)
+    saved_changes_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -109,4 +111,19 @@ class AuditLog(Base):
     resource_type = Column(String, index=True)
     resource_id = Column(Integer, nullable=True)
     detail = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class DocumentCorrection(Base):
+    __tablename__ = "document_corrections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    error_id = Column(String(64), nullable=True, index=True)
+    error_type = Column(String(32), nullable=False, index=True)
+    title = Column(String(512), nullable=True)
+    original_text = Column(Text, nullable=False)
+    suggestion = Column(Text, nullable=False)
+    reason = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

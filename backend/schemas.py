@@ -10,7 +10,8 @@ class DocumentCreate(BaseModel):
 
 
 class DocumentUpdate(BaseModel):
-    title: str
+    title: str | None = None
+    extracted_text: str | None = None
 
 
 class DocumentResponse(BaseModel):
@@ -152,6 +153,98 @@ class DocumentError(BaseModel):
 class DocumentErrors(BaseModel):
     summary: str
     errors: list[DocumentError]
+
+
+class DocumentCorrectionCreate(BaseModel):
+    error_id: str | None = None
+    error_type: str
+    title: str | None = None
+    original_text: str
+    suggestion: str
+    reason: str | None = None
+
+
+class DocumentCorrectionResponse(BaseModel):
+    id: int
+    document_id: int
+    user_id: int | None
+    error_id: str | None
+    error_type: str
+    title: str | None
+    original_text: str
+    suggestion: str
+    reason: str | None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AnalysisStatistics(BaseModel):
+    documents_analyzed: int = 0
+    total_norms_found: int = 0
+    grounded_norms: int = 0
+    ungrounded_norms: int = 0
+    avg_confidence: float | None = None
+    by_verdict: dict[str, int] = {}
+
+
+class UserStatisticsSummary(BaseModel):
+    corrections_total: int
+    corrections_by_type: dict[str, int]
+    analysis: AnalysisStatistics | None = None
+
+
+class DocumentSnapshotsPut(BaseModel):
+    """Persisted JSON blobs for ИИ analysis and formulation/changes panels."""
+
+    analysis: dict | None = None
+    changes: dict | None = None
+
+
+class DocumentSnapshotsGet(BaseModel):
+    analysis: dict | None = None
+    changes: dict | None = None
+
+
+class DocumentAiChatMessagePost(BaseModel):
+    message: str
+    document_plain_text: str | None = None
+
+
+class DocumentAiChatMessageIdBody(BaseModel):
+    message_id: int
+    document_plain_text: str | None = None
+
+
+class AiChatProposedEdit(BaseModel):
+    find: str
+    replace: str
+    reason: str | None = None
+
+
+class AiChatMessageItem(BaseModel):
+    id: int
+    role: str
+    content: str
+    created_at: datetime
+    assistant: dict | None = None
+
+
+class DocumentAiChatStateResponse(BaseModel):
+    chat_id: int
+    messages: list[AiChatMessageItem]
+
+
+class DocumentAiChatApproveResponse(BaseModel):
+    ok: bool
+    edits: list[AiChatProposedEdit]
+    merged_plain: str | None = None
+    detail: str | None = None
+
+
+class DocumentAiChatOkResponse(BaseModel):
+    ok: bool = True
 
 
 class FolderCreate(BaseModel):

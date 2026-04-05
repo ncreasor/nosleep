@@ -1,5 +1,10 @@
+import os
+import sys
 import uuid
+import shutil
 import logging
+import subprocess
+import tempfile
 from typing import Optional
 from pypdf import PdfReader
 from docx import Document as DocxDocument
@@ -8,13 +13,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+import anthropic
 from config import settings
 from models import Document as DocumentModel
 from database import AsyncSessionLocal
 from legal_nlp import LegalNER, RelationExtractor, DocumentParser, DefinitionExtractor
+from llm_json import parse_llm_json
 
 logger = logging.getLogger(__name__)
 openai_client = OpenAI(api_key=settings.openai_api_key)
+claude_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 
 def get_qdrant_client() -> QdrantClient:
@@ -39,21 +47,121 @@ def ensure_collection(client: QdrantClient, collection_name: str = None, vector_
         )
 
 
+def _find_libreoffice_soffice() -> str | None:
+    for name in ("soffice", "libreoffice"):
+        p = shutil.which(name)
+        if p:
+            return p
+    if sys.platform == "darwin":
+        mac = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        if os.path.isfile(mac):
+            return mac
+    if sys.platform == "win32":
+        for pf in (
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ):
+            for sub in (
+                r"LibreOffice\program\soffice.exe",
+                r"LibreOffice 24\program\soffice.exe",
+                r"LibreOffice 7\program\soffice.exe",
+            ):
+                p = os.path.join(pf, sub)
+                if os.path.isfile(p):
+                    return p
+    return None
+
+
+def extract_text_from_doc(path: str) -> str:
+    """Legacy Word .doc (OLE). Tries antiword, catdoc, then LibreOffice headless."""
+    antiword = shutil.which("antiword")
+    if antiword:
+        try:
+            r = subprocess.run(
+                [antiword, path],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                errors="replace",
+            )
+            if r.returncode == 0 and r.stdout and r.stdout.strip():
+                return r.stdout
+        except Exception as e:
+            logger.warning("antiword failed: %s", e)
+
+    catdoc = shutil.which("catdoc")
+    if catdoc:
+        try:
+            r = subprocess.run(
+                [catdoc, path],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                errors="replace",
+            )
+            if r.returncode == 0 and r.stdout and r.stdout.strip():
+                return r.stdout
+        except Exception as e:
+            logger.warning("catdoc failed: %s", e)
+
+    soffice = _find_libreoffice_soffice()
+    if soffice:
+        outdir = tempfile.mkdtemp(prefix="lo-doc-")
+        try:
+            subprocess.run(
+                [soffice, "--headless", "--convert-to", "txt:Text", path, "--outdir", outdir],
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+            base = os.path.splitext(os.path.basename(path))[0]
+            candidates = [
+                os.path.join(outdir, base + ".txt"),
+                os.path.join(outdir, base + ".TXT"),
+            ]
+            for c in candidates:
+                if os.path.isfile(c):
+                    with open(c, "r", encoding="utf-8", errors="replace") as f:
+                        t = f.read()
+                        if t.strip():
+                            return t
+            for name in os.listdir(outdir):
+                if name.lower().endswith(".txt"):
+                    fp = os.path.join(outdir, name)
+                    with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                        t = f.read()
+                        if t.strip():
+                            return t
+        except Exception as e:
+            logger.warning("LibreOffice convert .doc failed: %s", e)
+        finally:
+            shutil.rmtree(outdir, ignore_errors=True)
+
+    raise RuntimeError(
+        "Не удалось извлечь текст из .doc. Установите LibreOffice, antiword или catdoc на сервере."
+    )
+
+
 def extract_text(file_path: str, content_type: str) -> str:
     """Extract text from document"""
-    if content_type == "application/pdf" or file_path.endswith(".pdf"):
+    lower = file_path.lower()
+    if content_type == "application/pdf" or lower.endswith(".pdf"):
         reader = PdfReader(file_path)
         text = ""
         for page in reader.pages:
             text += page.extract_text()
         return text
-    elif content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or file_path.endswith(".docx"):
+    if (
+        content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or lower.endswith(".docx")
+    ):
         doc = DocxDocument(file_path)
         text = "\n".join([para.text for para in doc.paragraphs])
         return text
-    else:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return f.read()
+    if content_type == "application/msword" or (lower.endswith(".doc") and not lower.endswith(".docx")):
+        return extract_text_from_doc(file_path)
+    with open(file_path, "r", encoding="utf-8") as f:
+        return f.read()
 
 
 def generate_embedding(text: str) -> list[float]:
@@ -66,7 +174,7 @@ def generate_embedding(text: str) -> list[float]:
 
 
 def extract_metadata(text: str, title: str) -> dict:
-    """Extract metadata from document using GPT"""
+    """Extract metadata from document using Claude"""
     prompt = f"""Analyze this legal document and extract metadata.
 
 Document title: {title}
@@ -82,15 +190,14 @@ Return JSON with:
 Return ONLY JSON."""
 
     try:
-        response = openai_client.chat.completions.create(
-            model=settings.openai_model,
+        response = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=150,
         )
 
-        import json
-        result = json.loads(response.choices[0].message.content)
+        result = parse_llm_json(response.content[0].text)
         return {
             "category": result.get("category"),
             "law_date": result.get("law_date"),
@@ -108,7 +215,7 @@ Return ONLY JSON."""
 
 
 def classify_document(text: str, title: str) -> tuple[str, str]:
-    """Classify document using GPT"""
+    """Classify document using Claude"""
     prompt = f"""You are a Kazakh/Russian legal document classifier.
 Analyze this legal document and classify it as ONE of:
 - "genuine": currently valid law/regulation
@@ -121,16 +228,15 @@ Document text (first 2000 chars):
 
 Return ONLY JSON in format: {{"classification": "genuine|outdated|invalid", "reason": "short reason"}}"""
 
-    response = openai_client.chat.completions.create(
-        model=settings.openai_model,
+    response = claude_client.messages.create(
+        model="claude-haiku-4-5-20251001",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
         max_tokens=200,
     )
 
     try:
-        import json
-        result = json.loads(response.choices[0].message.content)
+        result = parse_llm_json(response.content[0].text)
         classification = result.get("classification", "genuine")
         reason = result.get("reason", "")
         return classification, reason
